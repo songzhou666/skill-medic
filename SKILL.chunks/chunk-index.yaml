@@ -1,0 +1,45 @@
+chunks:
+  - id: "01"
+    file: "chunk-01-overview.md"
+    title: "总览与状态机"
+    load: always
+
+  - id: "02"
+    file: "chunk-02-scan-inventory.md"
+    title: "扫描与清单盘点"
+    load: "phase == MED_SCOPE || phase == MED_ROSTER"
+
+  - id: "03"
+    file: "chunk-03-categorize.md"
+    title: "三维分类"
+    load: "phase == MED_SORT"
+
+  - id: "04"
+    file: "chunk-04-conflict.md"
+    title: "五类冲突检测"
+    load: "phase == MED_CONFLICT"
+
+  - id: "05"
+    file: "chunk-05-score.md"
+    title: "八维评分细则"
+    load: "phase == MED_VITAL"
+
+  - id: "06"
+    file: "chunk-06-synthesize.md"
+    title: "综合研判与处方"
+    load: "phase == MED_RX"
+
+  - id: "07"
+    file: "chunk-07-report.md"
+    title: "报告生成"
+    load: "phase == MED_DEBRIEF"
+
+  - id: "08"
+    file: "chunk-08-rubric.md"
+    title: "评分标准与外部参考"
+    load: "phase == MED_VITAL || phase == MED_CONFLICT"
+
+  - id: "09"
+    file: "chunk-09-agents.md"
+    title: "子Agent执行规范"
+    load: "agent == *"
