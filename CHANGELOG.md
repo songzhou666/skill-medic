@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## v0.4.9 (2026-08-05)
+
+### TRACE 自检补漏（对照 skill-trace-checker 25 项清单）
+
+- **P1 references/examples.md 缺失**（TRACE E 维度"每个主要模块有真实输出示例"）
+  → 新建 `references/examples.md`：8 个命令（ping/scan/analyze/conflict/score/prescribe/report/diff）的场景→命令→输出片段示例
+- **P1 渐进式披露第 3 层缺失**：SKILL.md 只引用 cli-guide，无 references 深度文档总览
+  → SKILL.md 新增"深度参考（references/，渐进式披露第 3 层）"表，列出 7 个参考文件用途
+- **P2 score 的 dim6 has_refs 信号失真**：inventory 无 ref_files_count，静态显示 false（实际有 references）
+  → scan_skills 补 `ref_files_count`（统计 references/reference/templates/protocols/agents 下 md/yaml/json 数）；实测 has_refs 恢复为 true
+- **P3 SKILL.md 缺"禁止笼统提示"**（TRACE R 维度"禁止'请提供更多信息'式空话"）
+  → 异常处理小节补一条："缺信息时禁止回复'请提供更多信息'，必须列出具体缺哪 N 项"
+- 验证：py_compile 通过；score 自举 has_refs=true；版本号 0.4.8 → 0.4.9（SKILL.md / manifest / README）
+
+## v0.4.8 (2026-08-05)
+
+### 真实用户反馈 5 项核查与修复（68 Skill 环境全流程实测）
+
+- **P1 docstring 参数序错误**：docstring 写 `report --save <root>`，但 report 实际无条件落盘、--save 冗余，且与 cli-guide/README（`report <root>`）不一致
+  → docstring 改为 `report <project_root>` 并注明"总是落盘，无需 --save"；需求文档 §8.2 同步
+- **P1 analyze/score 只认裸目录名**：scan 输出完整 path，但 analyze/score 传 `skills/xbrowser` 报"未找到该 Skill"
+  → analyze_skill 支持三种入参（绝对路径 / 相对路径 / 裸目录名）；score 取 basename 匹配，报错提示改为"请用 scan 输出的 Skill 目录名"
+- **P2 中文 bigram 碎片噪声**：字符级双字滑窗产生"以下/件与/么使"等无意义交集，导致 C2 大量误报
+  → STOP_BIGRAMS 扩充 60+ 中文高频碎片与跨词 bigram（实跑验证 conflict 候选下降）
+- **P3 候选目录未覆盖 .qclaw/skills**：GLOBAL_SKILLS_DIRS 补 `~/.qclaw/skills`；注释说明"候选目录无法穷举，未覆盖时依赖 available_skills 或传 project_root 到对应目录"
+- **P4 报告占位符易误读**：报告尾部新增阅读提示——"标有「LLM 回填 / 例：」的区块是 AI 完善区，需经完整检查流程（MED_DEBRIEF）回填后才算完成；只跑 CLI 看到占位属正常现象"
+- 验证：py_compile 通过；analyze 传完整路径、score 传裸名、conflict/report 实跑均正常；版本号 0.4.6 → 0.4.8（SKILL.md / manifest / README）
+
 ## v0.4.6 (2026-08-05)
 
 ### 四档评级语义精确定义（消除"放心用=很安全"的误读）

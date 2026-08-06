@@ -35,6 +35,7 @@ python run.py <action> <project_root> [params] [--save]
 |--------|------|---------------|------|
 | ping | `python run.py ping <root>` | — | MED_SCOPE |
 | scan | `python run.py scan <root> --save` | `.medic/_medic_inventory.json` | MED_ROSTER |
+| analyze | `python run.py analyze <root> <skill>` | —（skill 支持 绝对路径 / 相对路径 / 目录名） | MED_ROSTER |
 | categorize | `python run.py categorize <root> --save` | `.medic/_medic_classify.json` | MED_SORT |
 | conflict | `python run.py conflict <root> --save` | `.medic/_medic_conflicts.json` | MED_CONFLICT |
 | score | `python run.py score <root> <skill> --save` | `.medic/_medic_scores.json`（累积） | MED_VITAL |

@@ -3,13 +3,19 @@ medic_tools - SkillMedic 工具层 CLI
 
 用法:
     python run.py scan <project_root>                 # 列出所有 Skill 目录
-    python run.py analyze <project_root> <skill_dir>  # 静态指标分析
+    python run.py analyze <project_root> <skill>      # 静态指标分析（skill 支持路径或目录名）
     python run.py conflict <project_root>             # 静态冲突候选
-    python run.py score <project_root> <skill_dir>    # 静态指标输出
+    python run.py score <project_root> <skill>        # 静态指标输出（skill 支持路径或目录名）
     python run.py diff <project_root> <last_inventory># 增量差异对比
-    python run.py report --save <project_root>        # 报告落盘
+    python run.py report <project_root>               # 生成报告（总是落盘 .medic/，无需 --save）
     python run.py ping <project_root>                 # 工具自检
     python run.py cleanup <project_root>              # 清理临时文件
+
+说明:
+    - 命令统一格式为 <action> <project_root> [params] [--save]，参数在前、选项在后
+    - report 无条件落盘报告与清单，--save 可省略
+    - 仅跑 CLI 得到的是"静态骨架"，第 1/5/6/7 部分的结论/评分/建议由 AI
+      在完整检查流程（MED_DEBRIEF）中回填后才算完成
 """
 
 import argparse
@@ -41,7 +47,11 @@ GLOBAL_SKILLS_DIRS = [                                  # 全局 Skill 候选目
     os.path.join(os.path.expanduser("~"), ".claude", "skills"),
     os.path.join(os.path.expanduser("~"), ".cursor", "skills"),
     os.path.join(os.path.expanduser("~"), ".trae", "skills"),
+    os.path.join(os.path.expanduser("~"), ".qclaw", "skills"),
 ]
+# 说明：候选目录无法穷举所有 IDE（.qclaw 等为常见补充）。
+# 未覆盖的目录：① 依赖 IDE 注入的 available_skills 清单（第一数据源）；
+# ② 或把 project_root 直接指向该目录（命中通用 'skills' 候选）。
 # 本 Skill 专属产物目录（环境无关、自动创建）：
 # 清单/冲突/评分/报告/接力棒统一放这里，命名空间 _medic_*，不依赖任何既有 Skill 的目录约定
 MEDIC_DIR = ".medic"
@@ -301,6 +311,14 @@ def scan_skills(project_root: str) -> list[dict]:
                 "has_manifest": os.path.isfile(os.path.join(item_path, "1-manifest", "skill-manifest.yaml")),
             }
 
+            # references 等深度文档数量（dim6 内容价值弱信号：有深度参考 = 方法论沉淀）
+            ref_files_count = 0
+            for ref_dir in ["references", "reference", "templates", "protocols", "agents"]:
+                ref_path = os.path.join(item_path, ref_dir)
+                if os.path.isdir(ref_path):
+                    for _root, _dirs, files in os.walk(ref_path):
+                        ref_files_count += sum(1 for f in files if f.endswith((".md", ".yaml", ".json")))
+
             # 估算 token
             tokens_est = token_estimate(content)
 
@@ -314,6 +332,7 @@ def scan_skills(project_root: str) -> list[dict]:
                 "tags": fm.get("tags", ""),
                 "chars": len(content),
                 "tokens_est": tokens_est,
+                "ref_files_count": ref_files_count,
                 "has_frontmatter": fm["has_frontmatter"],
                 "frontmatter_completeness": fm["frontmatter_completeness"],
                 **dir_structure,
@@ -328,15 +347,25 @@ def analyze_skill(project_root: str, skill_name: str) -> dict:
     对单个 Skill 做静态指标分析。
     返回指标字典。
     """
-    # 从所有候选目录中定位该 Skill（多编辑器兼容）
+    # 定位该 Skill：支持三种入参——绝对路径 / 相对路径 / 裸目录名（与 scan 输出的 path 兼容）
     skill_dir = None
-    for d, _ in find_skills_dirs(project_root):
-        cand = os.path.join(d, skill_name)
-        if os.path.isdir(cand):
-            skill_dir = cand
-            break
+    if os.path.isdir(skill_name):
+        # 绝对路径（如 scan 输出的完整 path）或已存在的相对路径
+        skill_dir = skill_name
+    elif os.sep in skill_name or "/" in skill_name:
+        # 形如 skills/xbrowser 的相对路径：相对当前工作目录再试一次
+        if os.path.isdir(skill_name):
+            skill_dir = skill_name
+    if skill_dir is None:
+        # 裸目录名：在全部候选目录中查找
+        base = os.path.basename(skill_name.rstrip("/\\"))
+        for d, _ in find_skills_dirs(project_root):
+            cand = os.path.join(d, base)
+            if os.path.isdir(cand):
+                skill_dir = cand
+                break
     if not skill_dir:
-        return {"name": skill_name, "error": "未找到该 Skill 目录（已探测全部候选目录）", "status": "broken"}
+        return {"name": skill_name, "error": "未找到该 Skill 目录（已探测传入路径与全部候选目录）", "status": "broken"}
     skill_md = os.path.join(skill_dir, "SKILL.md")
 
     if not os.path.isfile(skill_md):
@@ -715,13 +744,17 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
         "schedule": "明确分工顺序", "slim": "瘦身", "maintain": "补维护文档",
         "fix-frontmatter": "修复 Skill 说明信息", "fix-or-archive": "修复或归档",
     }
+    rx_sev_plain = {"high": "高", "medium": "中", "low": "低"}
     if rx:
-        L.append("| 建议方向 | 对象 | 依据 |")
-        L.append("|----------|------|------|")
-        for r in rx:
+        # 按严重度排序（高→中→低），同一级别内保持原顺序
+        rx_sorted = sorted(rx, key=lambda r: {"high": 0, "medium": 1, "low": 2}.get(r.get("severity"), 3))
+        L.append("| 优先级 | 建议方向 | 对象 | 依据 |")
+        L.append("|:---:|----------|------|------|")
+        for r in rx_sorted:
             t = rx_type_plain.get(r['type'], r['type'])
-            L.append(f"| {t} | {', '.join(r['targets'])} | {r['rule']} |")
-        L.append("\n> 回填区：AI 为每条改造建议补\"精确操作\"（文件路径 + 改动内容 + 执行方式）与优先级；\"是否执行\"由用户/作者决定。\n")
+            sev = rx_sev_plain.get(r.get("severity"), r.get("severity") or "-")
+            L.append(f"| {sev} | {t} | {', '.join(r['targets'])} | {r['rule']} |")
+        L.append("\n> 回填区：AI 按优先级输出\"现在建议你做什么\"（先处理\"高\"），并为每条补精确操作（文件路径 + 改动内容 + 执行方式）；\"是否执行\"由用户/作者决定。\n")
     else:
         L.append("- 无改造建议候选")
     L.append("")
@@ -749,7 +782,10 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
     L.append("- 当前 rubric：8-axis-v0.1（内置基线，2026-08-04）")
     L.append("- 联网更新：未触发（用户未要求 / 版本未过期 / 非首次执行）。触发条件见 chunk-08")
 
-    L.append("\n---\n*报告由 SkillMedic 自动生成；一句话总结 / 评分 / 冲突影响 / 行动建议为 LLM 完善区*")
+    L.append("\n---\n")
+    L.append("*报告由 SkillMedic 生成。标有「LLM 回填 / 例：」的区块是 AI 完善区：第 1 部分结论、第 5 部分冲突影响、"
+             "第 6 部分评分定级、第 7.1 使用建议，需通过完整检查流程（MED_DEBRIEF）由 AI 回填后才算完成；"
+             "若你只运行了 CLI，看到占位属正常现象。*")
     return "\n".join(L)
 
 
@@ -967,6 +1003,16 @@ STOP_BIGRAMS = {
     "自动", "定义", "结构", "修复", "创建", "方案", "描述", "现有", "逻辑",
     "路径", "概念", "审核", "检测", "骨架", "上下", "下文", "文膨", "膨胀",
     "久化", "持久", "构化", "渐进", "闭环", "机制", "检查", "评估", "接口",
+    # 中文高频碎片与跨词 bigram（字符级双字滑窗产生的无意义片段，见 extract_keywords）
+    # 实跑反馈：以下/下场/件与/么使 等碎片导致 C2 大量误报
+    "以下", "下场", "件与", "么使", "时会", "以及", "并且", "还有", "然后",
+    "所以", "因为", "如果", "但是", "什么", "怎么", "如何", "哪些", "这个",
+    "一些", "没有", "不是", "就是", "而是", "位于", "包括", "提供", "生成",
+    "输出", "输入", "处理", "管理", "控制", "操作", "基本", "重要", "本次",
+    "全部", "其中", "部分", "某个", "各项", "各类", "种种", "部分", "各自",
+    "互相", "相互", "之间", "方面", "层面", "情况", "时候", "之后", "之前",
+    "以上", "以下", "根据", "按照", "经过", "利用", "借助", "围绕", "针对",
+    "做到", "做好", "给到", "交给", "反馈", "指定", "明确", "完成", "流程",
     # 英文停用词（避免英文 description 的模板词交集噪声，如 to/use/when/not）
     "the", "and", "for", "with", "not", "use", "uses", "used", "when", "where",
     "what", "how", "to", "a", "an", "of", "in", "on", "at", "is", "are", "be",
@@ -1234,10 +1280,13 @@ def main():
             print("Error: 需要指定 Skill 名称")
             sys.exit(1)
         skill_name = args.params[0]
+        # 兼容路径入参：传 skills/xbrowser 或完整 path 时取 basename 匹配（与 scan 输出对齐）
+        base = os.path.basename(skill_name.rstrip("/\\"))
         inventory = scan_skills(project_root)
-        skill = next((s for s in inventory if s["name"] == skill_name), None)
+        skill = next((s for s in inventory if s["name"] == base), None)
         if not skill:
-            print(json.dumps({"name": skill_name, "error": "未找到该 Skill"}, ensure_ascii=False))
+            print(json.dumps({"name": skill_name,
+                              "error": "未找到该 Skill（请用 scan 输出的 Skill 目录名）"}, ensure_ascii=False))
             return
         signals = static_score_signals(skill)
         if args.save:

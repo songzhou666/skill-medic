@@ -42,7 +42,7 @@ python .trae/skills/skill-medic/medic_tools/run.py report <project_root>
 
 ## 版本
 
-v0.4.6 — 四档评级语义精确化（可靠性/完成度，非安全性）；v0.4.5 报告格式铁律
+v0.4.9 — TRACE 自检补漏（examples.md / 渐进式披露第3层 / score 信号修复）；v0.4.8 真实反馈核查修复
 
 ## 依赖
 

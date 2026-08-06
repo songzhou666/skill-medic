@@ -1,7 +1,7 @@
 ---
 name: skill-medic
 display_name: SkillMedic — Skill 健康检查与冲突检测
-version: 0.4.6
+version: 0.4.9
 description: 检查你安装的所有 AI Skill（技能）：列出完整清单、发现内容重复或互相冲突的 Skill、评估每个 Skill 是否成熟可靠，并告诉你怎么处理（哪些可放心用、哪些建议合并或删除）。当用户问“我有哪些 skill / 哪些 skill 重复了 / skill 有没有问题 / 该留哪个 skill”时调用。当用户需要创建新 Skill、检查单个 Skill 质量、或纯知识问答时不要调用。
 tags: [skill-engineering, audit, conflict-detection, scoring, inventory]
 language: zh-CN
@@ -77,6 +77,18 @@ MED_SCOPE → MED_ROSTER → MED_SORT → MED_CONFLICT → MED_VITAL → MED_RX 
 
 ---
 
+## 深度参考（references/，渐进式披露第 3 层，按需查阅）
+
+| 文件 | 用途 |
+|------|------|
+| `references/rubric-detail.md` | 八维评分细则（每维满分标准与扣分证据） |
+| `references/score-keys.md` | 八维静态信号关键词表 |
+| `references/conflict-catalog.md` | 五类冲突示例目录 |
+| `references/anti-patterns.md` | 反模式清单（症状 / 危害 / 正确做法） |
+| `references/faq-deep.md` | 深度 FAQ（11 题：边缘场景 / 工具兼容 / 安全合规） |
+| `references/examples.md` | 各命令真实输出示例（场景 → 命令 → 输出片段） |
+| `references/cli-guide.md` | CLI 工具层调用约定（定位 / 失败处理 / 禁止项） |
+
 ## 接力棒文件
 
 - 路径：`.medic/_medic_baton.json`（本 Skill 专属目录，自动创建）
@@ -132,6 +144,7 @@ MED_SCOPE → MED_ROSTER → MED_SORT → MED_CONFLICT → MED_VITAL → MED_RX 
 ## 异常处理与输出准确性
 
 - **信息不足**（如目录探测不到）：不编造、不中断，列出"还缺什么/哪个范围未覆盖"，以可用数据继续
+- **禁止笼统提示**：缺信息时不回复"请提供更多信息"这类空话，必须列出具体缺哪 N 项（如"缺扫描范围 / 缺上次清单 / 某目录探测不到"）
 - **失败处理**：单批失败自动重试 1 次，仍失败标记 skip 继续，收尾汇总；接力棒状态异常按协议处理
 - **输出准确性**：每个结论必须可回溯到证据（文件/章节/指标值）；**禁止无依据编造评分或冲突结论**；证据不足的结论明确标注"待确认"
 
