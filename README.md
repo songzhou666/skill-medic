@@ -42,7 +42,7 @@ python .trae/skills/skill-medic/medic_tools/run.py report <project_root>
 
 ## 版本
 
-v0.4.16 — 六轮回归收敛（fix-frontmatter 边界 / 命名泛化 / description 优化）+ 端到端 12 项测试全过；v0.4.15 五轮实测收敛（报告第9部分定级阈值 / merge severity / BOM 兼容）；v0.4.14 四轮验收收敛（project_root 铁律 / 续跑 batch 恢复）
+v0.4.18 — 四档规模分级策略（S1 精细≤20 / S2 标准21~80 / S3 摘要81~300 / S4 极限>300：候选降噪、摘要报告+每域附录、处方聚合按档自动启用，少则精多则省）；v0.4.17 候选降噪与摘要模式
 
 ## 依赖
 

@@ -2,13 +2,13 @@
 medic_tools - SkillMedic 工具层 CLI
 
 用法:
-    python run.py scan <project_root>                 # 列出所有 Skill 目录
+    python run.py scan <project_root> [--save] [--scope workspace|global] [--extra-dir <path>...]  # 列出所有 Skill 目录（--save 落盘 _medic_inventory.json；--scope 限定范围；--extra-dir 追加自定义目录）
     python run.py analyze <project_root> <skill>      # 静态指标分析（skill 支持路径或目录名）
     python run.py categorize <project_root> [--save]  # 三维分类静态初值
     python run.py conflict <project_root> [--save]   # 静态冲突候选
     python run.py score <project_root> <skill> [--save]  # 静态指标输出（skill 支持路径或目录名）
     python run.py prescribe <project_root> [--save]   # 规则处方候选
-    python run.py diff <project_root> [last_inventory]# 增量差异对比（缺省用 _medic_last_inventory.json）
+    python run.py diff <project_root> [last_inventory]  # 增量差异对比（缺省用 _medic_last_inventory.json）
     python run.py report <project_root>               # 生成报告（总是落盘 .medic/，无需 --save）
     python run.py ping <project_root>                 # 工具自检
     python run.py cleanup <project_root>              # 清理临时文件
@@ -27,6 +27,7 @@ import shutil
 import sys
 import math
 import re
+from collections import defaultdict
 from datetime import datetime
 
 
@@ -69,10 +70,24 @@ C1_MIN_JACCARD = 0.12        # 同质冲突：Jaccard 下限
 C1_OVERLAP_JACCARD = 8       # 同质冲突：需同时满足 overlap 与 jaccard 的下限
 C2_MIN_OVERLAP = 4           # 意图抢占：非模板词交集下限
 C2_HIGH_OVERLAP = 10         # 意图抢占：高严重度交集数
+C2_CROSS_MIN_OVERLAP = 8     # 意图抢占：跨功能域对需更高交集（不同域抢占信号要更强）
+C2_CROSS_MIN_JACCARD = 0.15  # 意图抢占：跨功能域对需满足的 Jaccard 下限
+C1_TOP_K_PER_DOMAIN = 15     # C1/C2 共用：每功能域每类型最多保留 Top-K 组（C1 按 Jaccard、C2 按交集数降序，防候选爆炸）
 C3_TOKEN_THRESHOLD = 8000    # 上下文膨胀：常驻 token 阈值（且无 chunk 分层）
 C3_HIGH_TOKEN = 30000        # 上下文膨胀：高严重度阈值
 C4_INFRA_MIN_OWNERS = 4      # 依赖冲突：基础设施型共享（≥N Skill 引用则聚合单列，避免矩阵爆炸）
 C4_MTIME_DIFF_SEC = 86400 * 7  # 依赖冲突：双方实现 mtime 差异 >7 天 → 高严重度（一方改动未同步）
+
+# 摘要模式与附录（§6.2.1 规模分级策略）：活跃 Skill 数超过 S2 上限（80）时进入摘要模式，
+# 完整清单/分类/冲突/评分/处方按功能域拆多份附录，避免单份报告撑爆上下文（百级 Skill 场景）
+REPORT_TOP_CONFLICTS = 20      # 摘要模式（S3/S4）下主报告保留的冲突条数（按严重度高→低取前 N）
+REPORT_TOP_RX = 30             # 摘要模式（S3/S4）下主报告保留的处方条数（按严重度高→低取前 N）
+
+# 规模档位（§6.2.1 分级策略：少则精、多则省——不同数量级用不同分析深度，不笼统套一套方案）
+SCALE_S1_MAX = 20              # S1 精细：活跃 ≤20 → 全量冲突候选、完整报告、逐冲突核对
+SCALE_S2_MAX = 80              # S2 标准：21~80 → 全量冲突候选、完整报告、分批精析（摘要模式的阈值边界）
+SCALE_S3_MAX = 300             # S3 摘要：81~300 → 每域 Top-K=15、摘要报告 + 每域附录
+SCALE_S4_TOP_K = 10            # S4 极限：>300 → 每域 Top-K 收紧到 10、摘要 + 附录 + 处方聚合
 
 # token 估算公式（§9.2，固定）
 TOKEN_CJK_DIV = 1.7
@@ -131,6 +146,23 @@ def medic_dir(project_root: str) -> str:
     d = os.path.join(project_root, MEDIC_DIR)
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def scale_of(active_count: int) -> str:
+    """
+    按活跃 Skill 数返回规模档位（§6.2.1 分级策略：少则精、多则省）：
+    - S1 精细（≤20）：全量冲突候选、完整报告、逐冲突核对
+    - S2 标准（21~80）：全量冲突候选、完整报告、分批精析
+    - S3 摘要（81~300）：每域 Top-K=15、摘要报告 + 每域附录
+    - S4 极限（>300）：每域 Top-K=10、摘要报告 + 附录 + 处方聚合
+    """
+    if active_count <= SCALE_S1_MAX:
+        return "S1"
+    if active_count <= SCALE_S2_MAX:
+        return "S2"
+    if active_count <= SCALE_S3_MAX:
+        return "S3"
+    return "S4"
 
 
 def save_medic_json(project_root: str, filename: str, data) -> str:
@@ -239,31 +271,50 @@ def parse_frontmatter(content: str) -> dict:
     return result
 
 
-def scan_skills(project_root: str) -> list[dict]:
+def scan_skills(project_root: str, extra_dirs: list[str] | None = None) -> list[dict]:
     """
     扫描所有存在的 Skill 目录（多编辑器兼容，见 find_skills_dirs）。
     返回清单列表（不含正文全文）；同名 Skill 去重，workspace 优先，
     重复安装位置记入已收录条目的 dup_sources（供报告"重复安装"识别）。
+    extra_dirs: 用户显式指定的自定义 Skill 目录（scope 标记为 custom，追加到扫描列表）。
     """
     dirs = find_skills_dirs(project_root)
+    if extra_dirs:
+        dirs = dirs + [(os.path.abspath(d), "custom") for d in extra_dirs]
     if not dirs:
         print(f"Warning: 未探测到任何 Skill 目录（已尝试 {SKILLS_DIR_CANDIDATES} 与全局候选）——"
               f"可能目录在别处，请以 IDE 注入的 available_skills 清单为准")
         return []
 
-    def record_duplicate(name: str, item_path: str, skills_dir: str, scope: str) -> None:
-        """同名 Skill 在其他目录再出现时，把该安装位置记入已收录条目的 dup_sources（重复安装识别）"""
-        for s in inventory:
-            if s.get("name") == name:
-                s.setdefault("dup_sources", []).append({
-                    "path": item_path,
-                    "source": rel_or_abs(skills_dir, project_root),
-                    "scope": scope,
+    def register(name: str, entry: dict, item_path: str, skills_dir: str, scope: str) -> str:
+        """同名 Skill 注册（active 优先）：
+        - 无同名：新增为主条目
+        - 已有同名且新条目为 active 而旧条目为 broken：active 提升为主条目，旧 broken 位置降级记入 dup_sources
+          （避免 broken 版本先收录导致可用版本被误判为"重复安装"）
+        - 其余：记入已收录条目的 dup_sources（重复安装识别）
+        返回 "added" / "replaced" / "dup"
+        """
+        for i, s in enumerate(inventory):
+            if s.get("name") != name:
+                continue
+            if entry.get("status") == "active" and s.get("status") == "broken":
+                entry.setdefault("dup_sources", []).append({
+                    "path": s.get("path"),
+                    "source": s.get("source"),
+                    "scope": s.get("scope"),
                 })
-                return
+                inventory[i] = entry
+                return "replaced"
+            s.setdefault("dup_sources", []).append({
+                "path": item_path,
+                "source": rel_or_abs(skills_dir, project_root),
+                "scope": scope,
+            })
+            return "dup"
+        inventory.append(entry)
+        return "added"
 
     inventory = []
-    seen_names = set()
     for skills_dir, scope in dirs:
         try:
             entries = sorted(os.listdir(skills_dir))
@@ -289,11 +340,7 @@ def scan_skills(project_root: str) -> list[dict]:
                         if content:
                             fallback_desc = content[:1200]
                             break
-                if item in seen_names:
-                    record_duplicate(item, item_path, skills_dir, scope)
-                    continue  # 同名已收录（workspace 优先）
-                seen_names.add(item)
-                inventory.append({
+                register(item, {
                     "name": item,
                     "path": item_path,
                     "source": rel_or_abs(skills_dir, project_root),
@@ -302,31 +349,21 @@ def scan_skills(project_root: str) -> list[dict]:
                     "desc_source": "design_doc" if fallback_desc else None,
                     "status": "broken",
                     "broken_reason": "SKILL.md 缺失"
-                })
+                }, item_path, skills_dir, scope)
                 continue
 
             # 读取 SKILL.md（仅 frontmatter + 统计）
             content, error = read_file_safe(skill_md)
             if error:
-                if item in seen_names:
-                    record_duplicate(item, item_path, skills_dir, scope)
-                    continue
-                seen_names.add(item)
-                inventory.append({
+                register(item, {
                     "name": item,
                     "path": item_path,
                     "source": rel_or_abs(skills_dir, project_root),
                     "scope": scope,
                     "status": "broken",
                     "broken_reason": error
-                })
+                }, item_path, skills_dir, scope)
                 continue
-
-            # 同名去重：workspace 优先（候选目录顺序在前），重复安装位置记录到已收录条目
-            if item in seen_names:
-                record_duplicate(item, item_path, skills_dir, scope)
-                continue
-            seen_names.add(item)
 
             # 解析 frontmatter
             fm = parse_frontmatter(content)
@@ -364,7 +401,7 @@ def scan_skills(project_root: str) -> list[dict]:
                 if _ci_content:
                     always_load_tokens = token_estimate(content + "\n" + _ci_content)
 
-            inventory.append({
+            register(item, {
                 "name": item,
                 "path": item_path,
                 "source": rel_or_abs(skills_dir, project_root),
@@ -381,7 +418,7 @@ def scan_skills(project_root: str) -> list[dict]:
                 "frontmatter_completeness": fm["frontmatter_completeness"],
                 **dir_structure,
                 "status": "active"
-            })
+            }, item_path, skills_dir, scope)
 
     return inventory
 
@@ -540,10 +577,64 @@ def static_score_signals(skill: dict) -> dict:
     }
 
 
+def _aggregate_rx_for_large_scale(rx: list[dict]) -> list[dict]:
+    """
+    S4 极限模式处方聚合（>300 个 Skill 时启用）：批量同类处方合并，控制处方条目数量。
+    - fix-frontmatter / maintain / fix-or-archive / slim：同类型合并为一条（targets 列出全部）
+    - add-antitrigger：按 Skill 维度合并——同一 Skill 与 N 个对手抢占时聚合为一条
+      （完整冲突细节保留在附录冲突表，rule 注明数量，不丢失可追溯性）
+    - merge / boundary / schedule：保持逐对（涉及双方精确对象，聚合会失真）
+    """
+    batch_types = {"fix-frontmatter", "maintain", "fix-or-archive", "slim"}
+    by_type: dict[str, list[dict]] = {}
+    anti_by_skill: dict[str, list[dict]] = {}
+    rest: list[dict] = []
+    for r in rx:
+        t = r["type"]
+        if t in batch_types:
+            by_type.setdefault(t, []).append(r)
+        elif t == "add-antitrigger":
+            for s in r.get("targets", []):
+                anti_by_skill.setdefault(s, []).append(r)
+        else:
+            rest.append(r)
+    sev_order = {"high": 0, "medium": 1, "low": 2, "candidate": 3}
+    out: list[dict] = []
+    for t, rs in by_type.items():
+        targets = sorted({x for r in rs for x in r.get("targets", [])})
+        sev = min((r.get("severity", "low") for r in rs), key=lambda s: sev_order.get(s, 9))
+        # fix-or-archive 的 rule 内含各 Skill 不同的 broken_reason，聚合时逐 Skill 保留原因
+        detail = "明细见附录清单表"
+        if t == "fix-or-archive":
+            parts = []
+            for r in rs:
+                reason = "未知"
+                if "（" in r["rule"] and "）" in r["rule"]:
+                    reason = r["rule"].split("（", 1)[1].rsplit("）", 1)[0]
+                for target in r.get("targets", []):
+                    parts.append(f"{target}（{reason}）")
+            detail = "；".join(parts)
+        out.append({
+            "type": t, "severity": sev, "targets": targets, "conflict": rs[0].get("conflict"),
+            "rule": rs[0]["rule"] + "（批量聚合，共 %d 个 Skill，%s）" % (len(targets), detail),
+            "llm_todo": "对 targets 中每个 Skill 分别给出精确操作（文件路径 + 改动内容 + 执行方式）；聚合只压缩条目数、不压缩覆盖范围",
+        })
+    for s in sorted(anti_by_skill.keys(), key=str.lower):
+        rs = anti_by_skill[s]
+        sev = min((r.get("severity", "medium") for r in rs), key=lambda x: sev_order.get(x, 9))
+        out.append({
+            "type": "add-antitrigger", "severity": sev, "targets": [s], "conflict": "C2",
+            "rule": "意图抢占：该 Skill 与 %d 个其他 Skill 存在抢占（冲突对见附录冲突表），补'何时不要调用'反触发说明" % len(rs),
+            "llm_todo": "给出该 Skill description 的反触发改写建议（精确措辞）",
+        })
+    return rest + out
+
+
 def build_prescriptions(project_root: str, inventory: list[dict], conflicts: dict) -> list[dict]:
     """
     基于冲突矩阵 + 静态维护信号生成**规则处方候选**（MED_RX 阶段 06-synthesizer 使用）。
     规则层只给候选与方向；精确执行指引（文件路径+改动内容+执行方式）与优先级由 LLM 完善。
+    S4 极限模式（>300 个 Skill）返回前自动聚合批量同类处方。
     """
     rx = []
     active_names = {s["name"] for s in inventory if s.get("status") == "active"}
@@ -631,20 +722,187 @@ def build_prescriptions(project_root: str, inventory: list[dict], conflicts: dic
                 "llm_todo": "判断是否有保留价值（是否被引用/有设计文档），给出修复或归档动作"
             })
 
+    # S4 极限模式（>300 个 Skill）：批量同类处方聚合，控制处方条目数量
+    if scale_of(len(active_names)) == "S4":
+        rx = _aggregate_rx_for_large_scale(rx)
+
     return rx
 
 
+def _domain_of_skill_map(classify: list[dict]) -> dict:
+    """name -> 功能域映射（domain_final 优先，回退 domain_hint）。
+    与 conflict 的 load_domain_map 口径一致，保证附录挂域/冲突挂域使用同一套域映射。"""
+    m = {}
+    for c in classify:
+        if isinstance(c, dict) and c.get("name"):
+            m[c["name"]] = c.get("domain_final") or c.get("domain_hint") or "未归类"
+    return m
+
+
+def _safe_filename(name: str) -> str:
+    """文件名安全化：去掉 Windows/通用非法字符（冲突/斜杠/通配符/控制符），防路径穿越与落盘失败"""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip().strip('.')
+    return cleaned or "未归类"
+
+
+def build_appendix_files(project_root: str, inventory: list[dict], classify: list[dict],
+                         conflicts: dict, rx: list[dict], domain_map: dict) -> list[str]:
+    """
+    S3 摘要 / S4 极限档：把完整明细按功能域拆成多份附录（清单/分类/冲突/评分/处方），返回附录文件绝对路径列表。
+    每功能域一份 `skill_audit_appendix_<域>.md`；涉及跨域冲突的组只挂到 skill_a 所属域。
+    主报告（摘要模式）通过这些附录的路径引用细节，保证百级 Skill 下仍可逐域深挖。
+    """
+    active = [s for s in inventory if s.get("status") == "active"]
+    domain_of = domain_map or _domain_of_skill_map(classify)
+    # 每个 Skill 归属一个域（分类缺失归"未归类"），按域聚合清单
+    by_domain = defaultdict(list)
+    for s in active:
+        by_domain[domain_of.get(s["name"], "未归类")].append(s)
+
+    scope_plain = {"workspace": "项目内", "global": "全局"}
+    status_plain = {"active": "正常", "broken": "损坏"}
+    severity_plain = {"candidate": "待确认", "low": "低", "medium": "中", "high": "高"}
+    conflict_type_plain = {
+        "C1": "功能重复（C1）", "C2": "抢着响应（C2）", "C3": "占资源（C3）",
+        "C4": "共享依赖（C4）", "C5": "抢工具（C5）",
+    }
+    rx_type_plain = {
+        "merge": "合并重复", "add-antitrigger": "补'何时不要调用'", "boundary": "划清边界",
+        "schedule": "明确分工顺序", "slim": "瘦身", "maintain": "补维护文档",
+        "fix-frontmatter": "修复 Skill 说明信息", "fix-or-archive": "修复或归档",
+    }
+    rx_sev_plain = {"high": "高", "medium": "中", "low": "低", "candidate": "待确认"}
+    c_map = {c["name"]: c for c in classify}
+    pair_rows = (conflicts.get("C1", []) + conflicts.get("C2", []) +
+                 conflicts.get("C4", []) + conflicts.get("C5", []))
+    # 冲突挂域：按双方各自域各挂一次（跨域对在双方域附录都可见，保证 skill_b 侧可追溯）；
+    # 同域对只挂一次（set 去重，避免同一域内重复）
+    conflicts_by_domain = defaultdict(list)
+    for c in pair_rows:
+        da = domain_of.get(c.get("skill_a"), "未归类")
+        db = domain_of.get(c.get("skill_b"), "未归类")
+        for dom in sorted({da, db}):
+            conflicts_by_domain[dom].append(c)
+    # 处方挂域：聚合条目（跨多域）在**每个命中域**都挂载（rule 已注明是批量聚合，不重复计数）；
+    # 未命中任何域的（含 broken 的 fix-or-archive）归"未归类"
+    rx_by_domain = defaultdict(list)
+    for r in rx:
+        hit_doms = sorted({domain_of.get(t, "未归类") for t in r.get("targets", [])})
+        for dom in (hit_doms or ["未归类"]):
+            rx_by_domain[dom].append(r)
+
+    # 附录域集合 = 有 Skill 的域 ∪ 有处方/冲突的域（确保 broken 处方等不因无清单域而整体丢失）
+    all_doms = set(by_domain.keys()) | set(rx_by_domain.keys()) | set(conflicts_by_domain.keys())
+
+    appendix_paths = []
+    for dom in sorted(all_doms, key=str.lower):
+        skills = by_domain.get(dom, [])
+        A = []
+        A.append(f"# Skill 检查报告附录：{dom}\n")
+        A.append(f"- 功能域：{dom}（共 {len(skills)} 个 Skill）")
+        A.append("- 本附录为摘要/极限档（活跃 Skill > %d）下主报告的完整明细，供按域深挖；主报告只保留摘要与 Top 冲突。\n" % SCALE_S2_MAX)
+
+        # 清单表
+        A.append("## 清单表\n")
+        A.append("| Skill | 状态 | 所在位置 | 估算 Token | 版本 | 结构(多角色/分块/工具/协议) |")
+        A.append("|-------|------|---------|-----------|------|---------------------------|")
+        for s in sorted(skills, key=lambda x: x["name"]):
+            struct = "".join("✓" if s.get(k) else "·" for k in ["has_agents", "has_chunks", "has_tools", "has_protocols"])
+            A.append(f"| {s['name']} | {status_plain.get(s.get('status'), s.get('status'))} | "
+                     f"{scope_plain.get(s.get('scope'), s.get('scope'))} | {s.get('tokens_est', 'N/A')} | "
+                     f"{s.get('version') or '-'} | {struct} |")
+        A.append("")
+
+        # 分类表
+        A.append("## 分类表\n")
+        A.append("| Skill | 用途分组 | 交互方式 | 维护状态 |")
+        A.append("|-------|-----------|---------|---------|")
+        for s in sorted(skills, key=lambda x: x["name"]):
+            c = c_map.get(s["name"], {})
+            A.append(f"| {s['name']} | {c.get('domain_final') or c.get('domain_hint') or '未归类'} | {c.get('interaction') or '-'} | {c.get('lifecycle') or '-'} |")
+        A.append("")
+
+        # 冲突（挂到本域的组）
+        dom_conflicts = conflicts_by_domain.get(dom, [])
+        A.append("## 冲突与问题\n")
+        if dom_conflicts:
+            A.append("| A × B | 冲突类型 | 冲突点/资源 | 初判严重度 | 影响你什么 |")
+            A.append("|-------|---------|------------|-----------|-----------|")
+            for c in dom_conflicts:
+                a, b = c.get("skill_a", c.get("skill", "")), c.get("skill_b", "")
+                res = c.get("resource") or c.get("keywords") or c.get("jaccard") or ""
+                if isinstance(res, list):
+                    res = ",".join(str(x) for x in res[:5])
+                t = conflict_type_plain.get(c.get("type"), c.get("type"))
+                sev = severity_plain.get(c.get("severity"), c.get("severity", "待确认"))
+                A.append(f"| {a} × {b} | {t} | {res} | {sev} | |")
+        else:
+            A.append("- 无冲突候选")
+        for c in conflicts.get("C3", []):
+            if domain_of.get(c.get("skill"), "未归类") == dom:
+                A.append(f"- 占资源（C3）：{c['skill']}（常驻 token {c['tokens_est']}，无分块）→ 每次对话加载较多说明，可能拖慢响应")
+        A.append("")
+
+        # 评分明细
+        A.append("## 评分明细\n")
+        A.append("> 数字 = 该维度机器统计的证据数（越多说明写得越充分，专业参考用）；"
+                 "'通俗评估'列由 AI 复核后回填。'内容价值'维度由 AI 语义评判，不在表中。\n")
+        A.append("| Skill | 触发说明 | 流程步骤 | 异常处理 | 产出检查 | 边界约束 | 工程配套 | 维护痕迹 | 通俗评估 |")
+        A.append("|-------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----------------|")
+        for s in sorted(skills, key=lambda x: x["name"]):
+            sig = static_score_signals(s)
+            A.append(f"| {s['name']} | {len(sig['dim1_trigger'])} | {len(sig['dim2_flow'])} | "
+                     f"{len(sig['dim3_exception'])} | {len(sig['dim4_output'])} | "
+                     f"{len(sig['dim5_boundary']['hits'])} | "
+                     f"{sum(1 for v in sig['dim7_engineering'].values() if v)}/4 | "
+                     f"{sum(1 for v in sig['dim8_maintain'].values() if v)}/3 | |")
+        A.append("")
+
+        # 处方（挂到本域的）
+        dom_rx = rx_by_domain.get(dom, [])
+        A.append("## 改造建议（处方候选）\n")
+        if dom_rx:
+            rx_sorted = sorted(dom_rx, key=lambda r: {"high": 0, "medium": 1, "low": 2}.get(r.get("severity"), 3))
+            A.append("| 优先级 | 建议方向 | 对象 | 依据 | 精确操作 |")
+            A.append("|:---:|----------|------|------|----------|")
+            for r in rx_sorted:
+                t = rx_type_plain.get(r['type'], r['type'])
+                sev = rx_sev_plain.get(r.get("severity"), r.get("severity") or "-")
+                A.append(f"| {sev} | {t} | {', '.join(r['targets'])} | {r['rule']} | |")
+            A.append("\n> '精确操作'列由 07-reporter 逐域回填：聚合处方须对 targets 中**每个 Skill**分别给出"
+                     "文件路径 + 改动内容 + 执行方式（S4 聚合只压缩条目数、不压缩覆盖范围）。")
+        else:
+            A.append("- 无改造建议候选")
+        A.append("\n---\n")
+        A.append("*本附录由 SkillMedic 自动生成，属主报告的完整明细分卷。*")
+
+        appendix_dir = medic_dir(project_root)
+        ap_path = os.path.join(appendix_dir, f"skill_audit_appendix_{_safe_filename(dom)}.md")
+        with open(ap_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(A))
+        appendix_paths.append(ap_path)
+
+    return appendix_paths
+
+
 def build_report(project_root: str, inventory: list[dict], classify: list[dict],
-                 conflicts: dict, rx: list[dict]) -> str:
+                 conflicts: dict, rx: list[dict]) -> tuple[str, list[str]]:
     """
     装配 Skill 检查报告（静态可得的全部部分：元信息/总览/清单/分类/冲突/评分信号/处方/历史/标准）。
     一句话总结、评分、冲突影响、行动建议等 LLM 产物以"回填区"占位，由 07-reporter 在 MED_DEBRIEF 完善。
     报告面向普通用户：专业术语只作括号备注，主表达用日常语言。
+    分级策略（§6.2.1 scale_of）：S1 精细 / S2 标准 → 完整报告（全量明细）；
+    S3 摘要 / S4 极限 → 主报告只保留摘要 + Top 冲突/处方，完整明细按功能域拆附录，
+    返回 (主报告内容, 附录文件路径列表)。
     """
     now = datetime.now()
     L = []
     active = [s for s in inventory if s.get("status") == "active"]
     broken = [s for s in inventory if s.get("status") == "broken"]
+    scale = scale_of(len(active))
+    large_mode = scale in ("S3", "S4")
+    # 附录文件（S3/S4 摘要档生成；S1/S2 小报告返回空列表）
+    appendix_files: list[str] = []
 
     # 0 元信息
     L.append("# Skill 检查报告\n")
@@ -652,6 +910,17 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
     L.append(f"- **扫描范围**：项目内（workspace）候选 {SKILLS_DIR_CANDIDATES}；全局候选 {GLOBAL_SKILLS_DIRS}（探测不到不阻断）")
     L.append("- **评分标准版本**：8-axis-v0.1（内置基线，可联网更新）")
     L.append(f"- **异常 Skill（损坏/不可读）**：{len(broken)} 个（未评分）")
+    scale_plain = {
+        "S1": "精细模式（≤20 个：全量候选、完整报告、逐冲突核对）",
+        "S2": "标准模式（21~80 个：全量候选、完整报告、分批精析）",
+        "S3": "摘要模式（81~300 个：候选按域 Top-15 降噪、主报告摘要 + 每域附录）",
+        "S4": "极限模式（>300 个：候选按域 Top-10 降噪、处方聚合、主报告摘要 + 每域附录）",
+    }
+    # scale_plain 自带括号说明，直接拼接避免双重括号（如 "S1（精细模式（≤20 个…））"）
+    L.append(f"- **规模档位**：{scale} {scale_plain[scale]}")
+    if large_mode:
+        L.append(f"- **报告模式**：摘要模式（活跃 Skill {len(active)} 个，超过 {SCALE_S2_MAX} 阈值）——"
+                 "主报告只保留摘要与 Top 冲突/处方，完整清单/分类/冲突/评分/处方按功能域拆分见第 3 部分末尾的附录文件列表")
     for b in broken:
         L.append(f"  - {b['name']}：{b.get('broken_reason', '未知')}")
     L.append("")
@@ -704,7 +973,7 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
     avg_tok = sum(tokens) / len(tokens) if tokens else 0
     domain_count = {}
     for c in classify:
-        d = c.get("domain_hint") or "未归类"
+        d = c.get("domain_final") or c.get("domain_hint") or "未归类"
         domain_count[d] = domain_count.get(d, 0) + 1
     L.append(f"- Skill 总数：{len(inventory)}（活跃 {len(active)} / 异常 {len(broken)}）")
     L.append(f"- 常驻估算 token：平均 {avg_tok:.0f} / 最大 {max(tokens) if tokens else 0}")
@@ -714,26 +983,49 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
 
     # 3 清单表
     L.append("## 3. 清单表\n")
-    L.append("| Skill | 状态 | 所在位置 | 估算 Token | 版本 | 结构(多角色/分块/工具/协议) |")
-    L.append("|-------|------|---------|-----------|------|---------------------------|")
-    scope_plain = {"workspace": "项目内", "global": "全局"}
-    status_plain = {"active": "正常", "broken": "损坏"}
-    for s in sorted(inventory, key=lambda x: x["name"]):
-        struct = "".join("✓" if s.get(k) else "·" for k in ["has_agents", "has_chunks", "has_tools", "has_protocols"])
-        L.append(f"| {s['name']} | {status_plain.get(s.get('status'), s.get('status'))} | "
-                 f"{scope_plain.get(s.get('scope'), s.get('scope'))} | {s.get('tokens_est', 'N/A')} | "
-                 f"{s.get('version') or '-'} | {struct} |")
-    L.append("")
+    domain_of = _domain_of_skill_map(classify)
+    if large_mode:
+        # S3/S4 摘要档：只输出按功能域聚合的摘要 + 附录指引，完整清单见附录
+        by_domain = defaultdict(list)
+        for s in active:
+            by_domain[domain_of.get(s["name"], "未归类")].append(s)
+        L.append(f"- 共 {len(active)} 个活跃 Skill，按功能域聚合（完整清单/分类/评分/处方见下方附录）：")
+        for dom in sorted(by_domain.keys(), key=str.lower):
+            ap_rel = os.path.join(MEDIC_DIR, f"skill_audit_appendix_{_safe_filename(dom)}.md")
+            L.append(f"  - {dom}：{len(by_domain[dom])} 个 → `{ap_rel}`")
+        L.append("")
+        # 生成附录文件（S3/S4 摘要档：主报告与附录同批落盘）
+        appendix_files.extend(build_appendix_files(
+            project_root, inventory, classify, conflicts, rx, domain_of))
+        L.append("**附录文件列表（完整明细，按功能域拆分）**：")
+        for ap in appendix_files:
+            L.append(f"- `{rel_or_abs(ap, project_root)}`")
+        L.append("")
+    else:
+        L.append("| Skill | 状态 | 所在位置 | 估算 Token | 版本 | 结构(多角色/分块/工具/协议) |")
+        L.append("|-------|------|---------|-----------|------|---------------------------|")
+        scope_plain = {"workspace": "项目内", "global": "全局"}
+        status_plain = {"active": "正常", "broken": "损坏"}
+        for s in sorted(inventory, key=lambda x: x["name"]):
+            struct = "".join("✓" if s.get(k) else "·" for k in ["has_agents", "has_chunks", "has_tools", "has_protocols"])
+            L.append(f"| {s['name']} | {status_plain.get(s.get('status'), s.get('status'))} | "
+                     f"{scope_plain.get(s.get('scope'), s.get('scope'))} | {s.get('tokens_est', 'N/A')} | "
+                     f"{s.get('version') or '-'} | {struct} |")
+        L.append("")
 
     # 4 分类表
     L.append("## 4. 分类表\n")
-    L.append("| Skill | 用途分组 | 交互方式 | 维护状态 |")
-    L.append("|-------|-----------|---------|---------|")
-    c_map = {c["name"]: c for c in classify}
-    for s in sorted(inventory, key=lambda x: x["name"]):
-        c = c_map.get(s["name"], {})
-        L.append(f"| {s['name']} | {c.get('domain_hint') or '未归类'} | {c.get('interaction') or '-'} | {c.get('lifecycle') or '-'} |")
-    L.append("")
+    if large_mode:
+        L.append(f"> 摘要模式（S3/S4 档）：完整分类明细（用途分组/交互方式/维护状态）见各功能域附录，"
+                 f"主报告仅保留功能域分布——{len(active)} 个活跃 Skill 按域统计见第 2 部分总览。\n")
+    else:
+        L.append("| Skill | 用途分组 | 交互方式 | 维护状态 |")
+        L.append("|-------|-----------|---------|---------|")
+        c_map = {c["name"]: c for c in classify}
+        for s in sorted(inventory, key=lambda x: x["name"]):
+            c = c_map.get(s["name"], {})
+            L.append(f"| {s['name']} | {c.get('domain_final') or c.get('domain_hint') or '未归类'} | {c.get('interaction') or '-'} | {c.get('lifecycle') or '-'} |")
+        L.append("")
 
     # 5 冲突与问题（专业明细：静态候选；影响由 AI 复核）
     L.append("## 5. 冲突与问题\n")
@@ -745,7 +1037,27 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
     severity_plain = {"candidate": "待确认", "low": "低", "medium": "中", "high": "高"}
     conflict_rows = (conflicts.get("C1", []) + conflicts.get("C2", []) +
                      conflicts.get("C4", []) + conflicts.get("C5", []))
-    if conflict_rows:
+    if large_mode and conflict_rows:
+        # S3/S4 摘要档：主报告只保留严重度最高（高→中→低）的前 N 组，完整冲突矩阵见附录
+        sev_order = {"high": 0, "medium": 1, "low": 2, "candidate": 3}
+        top_rows = sorted(conflict_rows, key=lambda c: sev_order.get(c.get("severity"), 4))[:REPORT_TOP_CONFLICTS]
+        L.append(f"共 {len(conflict_rows)} 组冲突候选，以下为主报告保留的严重度最高的 {len(top_rows)} 组（完整清单见各功能域附录）：\n")
+        L.append("| A × B | 冲突类型 | 冲突点/资源 | 初判严重度 | 影响你什么 |")
+        L.append("|-------|---------|------------|-----------|-----------|")
+        for c in top_rows:
+            a, b = c.get("skill_a", c.get("skill", "")), c.get("skill_b", "")
+            res = c.get("resource") or c.get("keywords") or c.get("jaccard") or ""
+            if isinstance(res, list):
+                res = ",".join(str(x) for x in res[:5])
+            t = conflict_type_plain.get(c.get("type"), c.get("type"))
+            sev = severity_plain.get(c.get("severity"), c.get("severity", "待确认"))
+            L.append(f"| {a} × {b} | {t} | {res} | {sev} | |")
+        L.append("\n> 说明：'冲突点/资源'含机器比对信息（专业参考），'影响你什么'列由 AI 复核后用日常语言补充；"
+                 "完整冲突候选请查阅对应功能域附录。\n")
+        L.append("<!-- AI 回填参考示例（供复核时对照，不写入报告）：抢着响应 → \"当你说'帮我扫描页面'时，2 个 Skill 都会响应，AI 可能随机选一个 → 结果不稳定\"；"
+                 "功能重复 → \"两个 Skill 做同一件事，你不知道用哪个，建议只留一个\"；"
+                 "同一 Skill 出现在两个 IDE 目录 → \"是分别安装过，建议只保留一份\"。 -->\n")
+    elif conflict_rows:
         L.append("| A × B | 冲突类型 | 冲突点/资源 | 初判严重度 | 影响你什么 |")
         L.append("|-------|---------|------------|-----------|-----------|")
         for c in conflict_rows:
@@ -762,7 +1074,12 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
                  "同一 Skill 出现在两个 IDE 目录 → \"是分别安装过，建议只保留一份\"。 -->\n")
     else:
         L.append("- 无冲突候选")
-    for c in conflicts.get("C3", []):
+    # C3 占资源：摘要档（S3/S4）主报告只保留最严重的 Top-N（完整清单在附录）；小规模全量
+    c3_rows = conflicts.get("C3", [])
+    if large_mode and len(c3_rows) > REPORT_TOP_CONFLICTS:
+        c3_rows = sorted(c3_rows, key=lambda c: -c.get("tokens_est", 0))[:REPORT_TOP_CONFLICTS]
+        L.append(f"占资源（C3）：共 {len(conflicts.get('C3', []))} 个 Skill 超常驻阈值，主报告只列最严重的 {len(c3_rows)} 个（完整清单见各功能域附录）：")
+    for c in c3_rows:
         L.append(f"- 占资源（C3）：{c['skill']}（常驻 token {c['tokens_est']}，无分块）→ 每次对话加载较多说明，可能拖慢响应")
     if conflicts.get("C4_infra"):
         L.append("\n**基础设施共享**（多个 Skill 引用同一资源，聚合不拆对）：")
@@ -778,17 +1095,22 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
 
     # 6 评分明细（静态信号摘要；打分与通俗评估由 AI 复核）
     L.append("## 6. 评分明细\n")
-    L.append("> 数字 = 该维度机器统计的证据数（越多说明这个 Skill 该维度写得越充分，专业参考用）；"
-             "想快速知道结果，看最后一列\"通俗评估\"即可。\"内容价值\"维度由 AI 语义评判，不在表中。\n")
-    L.append("| Skill | 触发说明 | 流程步骤 | 异常处理 | 产出检查 | 边界约束 | 工程配套 | 维护痕迹 | 通俗评估 |")
-    L.append("|-------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----------------|")
-    for s in sorted(active, key=lambda x: x["name"]):
-        sig = static_score_signals(s)
-        L.append(f"| {s['name']} | {len(sig['dim1_trigger'])} | {len(sig['dim2_flow'])} | "
-                 f"{len(sig['dim3_exception'])} | {len(sig['dim4_output'])} | "
-                 f"{len(sig['dim5_boundary']['hits'])} | "
-                 f"{sum(1 for v in sig['dim7_engineering'].values() if v)}/4 | "
-                 f"{sum(1 for v in sig['dim8_maintain'].values() if v)}/3 | |")
+    if large_mode:
+        L.append(f"> 摘要模式（S3/S4 档）：完整评分明细（每 Skill 八维证据数）见各功能域附录；"
+                 f"主报告仅保留健康度分布条（由 AI 回填，必须与附录评分一致）。\n")
+    else:
+        L.append("> 数字 = 该维度机器统计的证据数（越多说明这个 Skill 该维度写得越充分，专业参考用）；"
+                 "想快速知道结果，看最后一列\"通俗评估\"即可。\"内容价值\"维度由 AI 语义评判，不在表中。\n")
+        L.append("| Skill | 触发说明 | 流程步骤 | 异常处理 | 产出检查 | 边界约束 | 工程配套 | 维护痕迹 | 通俗评估 |")
+        L.append("|-------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----------------|")
+        for s in sorted(active, key=lambda x: x["name"]):
+            sig = static_score_signals(s)
+            L.append(f"| {s['name']} | {len(sig['dim1_trigger'])} | {len(sig['dim2_flow'])} | "
+                     f"{len(sig['dim3_exception'])} | {len(sig['dim4_output'])} | "
+                     f"{len(sig['dim5_boundary']['hits'])} | "
+                     f"{sum(1 for v in sig['dim7_engineering'].values() if v)}/4 | "
+                     f"{sum(1 for v in sig['dim8_maintain'].values() if v)}/3 | |")
+        L.append("")
     L.append("<!-- AI 回填：对照八维细则给出每维分数/证据/扣分定位与定级，定级用通俗格式如\"放心用（L3）\"（映射：L3 放心用 / L2 基本能用 / L1 不太成熟 / L0 不建议用）。回填后删除本注释。 -->\n")
 
     # 7 行动建议（分两层：7.1 使用建议=使用者直接照做；7.2 改造建议=创建者改 Skill 文件，可选）
@@ -804,10 +1126,14 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
         "schedule": "明确分工顺序", "slim": "瘦身", "maintain": "补维护文档",
         "fix-frontmatter": "修复 Skill 说明信息", "fix-or-archive": "修复或归档",
     }
-    rx_sev_plain = {"high": "高", "medium": "中", "low": "低"}
+    rx_sev_plain = {"high": "高", "medium": "中", "low": "低", "candidate": "待确认"}
     if rx:
         # 按严重度排序（高→中→低），同一级别内保持原顺序
         rx_sorted = sorted(rx, key=lambda r: {"high": 0, "medium": 1, "low": 2}.get(r.get("severity"), 3))
+        if large_mode:
+            top_rx = rx_sorted[:REPORT_TOP_RX]
+            L.append(f"共 {len(rx_sorted)} 条处方候选，以下为主报告保留的优先级最高的 {len(top_rx)} 条（完整处方见各功能域附录）：\n")
+            rx_sorted = top_rx
         L.append("| 优先级 | 建议方向 | 对象 | 依据 |")
         L.append("|:---:|----------|------|------|")
         for r in rx_sorted:
@@ -845,7 +1171,7 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
 
     L.append("\n---\n")
     L.append("*本报告由 SkillMedic 自动生成；结论、评分定级与行动建议由 AI 结合完整检查流程输出。*")
-    return "\n".join(L)
+    return "\n".join(L), appendix_files
 
 
 # ---- 三维分类静态初值（LLM 可修正，§4.3 软约束规则 2）----
@@ -876,17 +1202,45 @@ INTERACTION_KEYWORDS = {
 
 def collect_skill_text(skill_dir: str, max_chars: int = 200_000) -> str:
     """
-    收集 Skill 的"实现声明"文本（SKILL.md + agents/protocols + 工具层 py +
-    references/mcp-reference.md），用于静态资源引用比对。
+    收集 Skill 的"实现声明"文本（工具层 py + SKILL.md + agents/protocols + references/mcp-reference.md），
+    用于静态资源引用比对。工具层 py 排在最前并优先保留——它是 C4/C5 核心信号源（CDP/Playwright/COS/端口），
+    若被 SKILL.md 长正文挤到截断区会导致大 Skill 的资源冲突静默漏报。
     注意：不读 references 其他文件与 SKILL.chunks——那些是知识/示例材料，
     其中的"CDP/Playwright"等词是说明文字，会被误判为资源声明（如本 Skill 的 conflict-catalog）。
     """
-    chunks_text = []
+    tool_texts: list[str] = []
+    body_texts: list[str] = []
+
+    # 工具层 py 文件（只读前 300 行，避免把整个实现读入）——优先保留，放最前
+    # 识别任意 <skill>_tools / tools 目录（is_tools_dir 泛化，不依赖具体 Skill 名）
+    # 注意：跳过 medic_tools 自身——检测器代码天然包含所有关键字（playwright/CDP/aitest），
+    # 读入会造成自引用误报（如本 Skill 的 run.py）
+    if os.path.isdir(skill_dir):
+        for entry in sorted(_safe_listdir(skill_dir)):
+            if not is_tools_dir(entry) or entry == "medic_tools":
+                continue
+            tp = os.path.join(skill_dir, entry)
+            if not os.path.isdir(tp):
+                continue
+            try:
+                tool_files = os.listdir(tp)
+            except OSError as e:
+                print(f"Warning: 无法读取工具目录 {tp}：{e}（跳过该工具目录的 C4/C5 比对）")
+                continue
+            for f in tool_files:
+                if f.endswith(".py") and f != "__init__.py":
+                    fp = os.path.join(tp, f)
+                    try:
+                        with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                            tool_texts.append("\n".join(fh.readlines()[:300]))
+                    except Exception as e:
+                        print(f"Warning: 读取 {fp} 失败（跳过该工具文件）: {e}")
+
     skill_md = os.path.join(skill_dir, "SKILL.md")
     if os.path.isfile(skill_md):
         content, _ = read_file_safe(skill_md)
         if content:
-            chunks_text.append(content)
+            body_texts.append(content)
 
     # agents / protocols 是执行声明文件
     for sub in ["agents", "protocols"]:
@@ -899,37 +1253,21 @@ def collect_skill_text(skill_dir: str, max_chars: int = 200_000) -> str:
                         fp = os.path.join(root, f)
                         content, _ = read_file_safe(fp)
                         if content:
-                            chunks_text.append(content)
+                            body_texts.append(content)
 
     # 仅 mcp-reference.md 属于资源声明，纳入比对
     mcp_ref = os.path.join(skill_dir, "references", "mcp-reference.md")
     if os.path.isfile(mcp_ref):
         content, _ = read_file_safe(mcp_ref)
         if content:
-            chunks_text.append(content)
+            body_texts.append(content)
 
-    # 工具层 py 文件（只读前 300 行，避免把整个实现读入）
-    # 识别任意 <skill>_tools / tools 目录（is_tools_dir 泛化，不依赖具体 Skill 名）
-    # 注意：跳过 medic_tools 自身——检测器代码天然包含所有关键字（playwright/CDP/aitest），
-    # 读入会造成自引用误报（如本 Skill 的 run.py）
-    if os.path.isdir(skill_dir):
-        for entry in sorted(_safe_listdir(skill_dir)):
-            if not is_tools_dir(entry) or entry == "medic_tools":
-                continue
-            tp = os.path.join(skill_dir, entry)
-            if not os.path.isdir(tp):
-                continue
-            for f in os.listdir(tp):
-                if f.endswith(".py") and f != "__init__.py":
-                    fp = os.path.join(tp, f)
-                    try:
-                        with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
-                            chunks_text.append("\n".join(fh.readlines()[:300]))
-                    except Exception as e:
-                        print(f"Warning: 读取 {fp} 失败（跳过该工具文件）: {e}")
-
-    text = "\n".join(chunks_text)
-    return text[:max_chars]
+    # 截断优先级：工具层在前（C4/C5 核心信号源），正文在后——超限时优先截正文
+    tool_part = "\n".join(tool_texts)
+    body_part = "\n".join(body_texts)
+    if len(tool_part) >= max_chars:
+        return tool_part[:max_chars]
+    return tool_part + "\n" + body_part[: max_chars - len(tool_part)]
 
 
 # 环境变量精确提取模式（只匹配真实读取语法，避免 SQL 关键词/代码常量误报）
@@ -1108,10 +1446,185 @@ def extract_keywords(text: str) -> set[str]:
     return kws - STOP_BIGRAMS
 
 
-def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
+def load_domain_map(project_root: str) -> dict:
+    """读取 `.medic/_medic_classify.json` 的 domain_final（LLM 已回填）/domain_hint 构建 name->domain 映射。
+    文件不存在或损坏返回空 dict（conflict 退化为全同域比对）。"""
+    p = os.path.join(medic_dir(project_root), "_medic_classify.json")
+    if not os.path.isfile(p):
+        return {}
+    try:
+        with open(p, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(data, list):
+        return {}
+    m = {}
+    for e in data:
+        if isinstance(e, dict) and e.get("name"):
+            m[e["name"]] = e.get("domain_final") or e.get("domain_hint") or "未归类"
+    return m
+
+
+def load_classify_merged(project_root: str, inventory: list[dict]) -> list[dict]:
+    """
+    读取 `.medic/_medic_classify.json` 的 LLM 回填版分类（domain_final/interaction/lifecycle），
+    与本次 scan 的 inventory 合并：磁盘回填条目优先（按 name），未回填的 active Skill 现场重算静态初值。
+    返回与 report 第 4 部分 / 附录分类表 / 附录挂域同源的分类列表——
+    与 conflict 的 load_domain_map 共用同一套 domain_final 口径，避免"附录挂域用静态初值、
+    冲突判定用回填值"的分裂（§6.2.1）。文件不存在或损坏时全部现场重算（退化为静态初值）。
+    """
+    disk = {}
+    p = os.path.join(medic_dir(project_root), "_medic_classify.json")
+    if os.path.isfile(p):
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                for e in data:
+                    if isinstance(e, dict) and e.get("name"):
+                        disk[e["name"]] = e
+        except Exception:
+            disk = {}
+    out = []
+    for s in inventory:
+        if s.get("status") != "active":
+            continue
+        cached = disk.get(s["name"])
+        if cached and (cached.get("domain_final") or cached.get("interaction") or cached.get("lifecycle")):
+            # 磁盘回填版存在且含有效回填字段：直接用（保留静态初值字段作为 fallback 来源）
+            out.append(cached)
+        else:
+            out.append(classify_skill(s, project_root))
+    return out
+
+
+def load_conflicts_merged(project_root: str, inventory: list[dict]) -> dict:
+    """
+    读取 `.medic/_medic_conflicts.json` 的 03 写回版冲突矩阵（severity/evidence/impact 已确认、
+    伪冲突已移除）；文件不存在/损坏/结构无效时现场重算静态候选（load_domain_map 退化为全同域）。
+    prescribe 与 report 用此函数，保证处方目标集以写回版矩阵为准（剔除 removed_pairs、含 AI 补充对）。
+    """
+    p = os.path.join(medic_dir(project_root), "_medic_conflicts.json")
+    if os.path.isfile(p):
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict) and any(k in data for k in ("C1", "C2", "C3", "C4", "C5")):
+                return data
+        except Exception:
+            pass
+    return build_conflict_candidates(project_root, inventory, load_domain_map(project_root))
+
+
+def load_rx_merged(project_root: str, inventory: list[dict], conflicts: dict) -> list[dict]:
+    """
+    读取 `.medic/_medic_rx.json` 的 06 写回版处方（llm_actions 已完善、severity/targets 已调整、
+    含 06 依据评分补的整改/移除类处方）；文件不存在/损坏/结构无效时退化为规则候选
+    build_prescriptions（仅静态规则，无 06 语义完善）。
+    report 用此函数保证主报告 7.2 表与附录处方行以 06 写回版为准（与 07 回填 llm_actions 同源），
+    避免"报告重算候选 vs 07 读写回版"的行集/字段失配。
+    """
+    p = os.path.join(medic_dir(project_root), "_medic_rx.json")
+    if os.path.isfile(p):
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return build_prescriptions(project_root, inventory, conflicts)
+
+
+def _conflict_key(c_type: str, item: dict):
+    """冲突条目稳定键（用于合并写回版时对位）：C1/C2 按双方集合，C3 按 Skill，C4/C5 按双方+资源。"""
+    if c_type in ("C1", "C2"):
+        return (c_type, frozenset([item.get("skill_a"), item.get("skill_b")]))
+    if c_type == "C3":
+        return (c_type, item.get("skill"))
+    return (c_type, item.get("skill_a"), item.get("skill_b"), item.get("resource"))
+
+
+def merge_classify_with_disk(new_results: list[dict], disk_data) -> list[dict]:
+    """categorize --save 合并：把旧文件（02 已回填）的 domain_final/interaction/lifecycle/evidence 保留到新条目。
+    静态初值每次重算，但 LLM 确认字段不因重跑 --save 丢失（02/05 追溯与 report 第 4 部分依赖）。"""
+    if not isinstance(disk_data, list):
+        return new_results
+    old = {}
+    for e in disk_data:
+        if isinstance(e, dict) and e.get("name"):
+            old[e["name"]] = e
+    for item in new_results:
+        prev = old.get(item.get("name"))
+        if not prev:
+            continue
+        for field in ("domain_final", "interaction", "lifecycle", "domain_evidence", "evidence"):
+            if prev.get(field) and not item.get(field):
+                item[field] = prev[field]
+    return new_results
+
+
+def merge_conflicts_with_disk(new_candidates: dict, disk_data) -> dict:
+    """conflict --save 合并：把旧文件（03/05 已确认）的 severity/evidence/impact 保留到新候选。
+    静态候选每次重算，但 LLM 确认字段不因重跑 --save 丢失（打回重做后 03 只补证据不重复定级）。
+    - severity：**"旧值已确认则覆盖"**——旧文件里非 candidate 的 severity（03 对 C2~C5 的定级、05 对 C1 补齐的
+      高/中）视为已确认，覆盖新候选的静态初值（candidate 视为未确认占位，不覆盖）；
+      C1 旧值若仍为 candidate（未定级）则不覆盖，保持新候选 candidate
+    - evidence/impact：新值空缺时回填旧值（静态候选不生成这两字段）
+    注意：removed_pairs（伪冲突移除）在接力棒中记录，重跑 --save 后需按该清单重新移除（见 03-agent 规则）。"""
+    if not isinstance(disk_data, dict):
+        return new_candidates
+    old_by_key = {}
+    for t, items in disk_data.items():
+        if t not in ("C1", "C2", "C3", "C4", "C5"):
+            continue
+        for it in items:
+            if isinstance(it, dict):
+                old_by_key[_conflict_key(t, it)] = it
+    for t, items in new_candidates.items():
+        if t not in ("C1", "C2", "C3", "C4", "C5"):
+            continue
+        for it in items:
+            prev = old_by_key.get(_conflict_key(t, it))
+            if not prev:
+                continue
+            # severity：旧值非 candidate（已确认）优先；candidate 视为未确认不覆盖
+            prev_sev = prev.get("severity")
+            if prev_sev and prev_sev != "candidate":
+                it["severity"] = prev_sev
+            # evidence/impact：静态候选不生成，新值空缺时回填旧确认值
+            for field in ("evidence", "impact"):
+                if prev.get(field) and not it.get(field):
+                    it[field] = prev[field]
+    return new_candidates
+
+
+def merge_rx_with_disk(new_rx: list[dict], disk_data) -> list[dict]:
+    """prescribe --save 合并：把旧文件（06 已完善）的 llm_actions/llm_todo/priority 保留到新候选。
+    06 打回重做后不丢失已写回的精确操作。"""
+    if not isinstance(disk_data, list):
+        return new_rx
+    old_by_key = {}
+    for it in disk_data:
+        if isinstance(it, dict):
+            old_by_key[(it.get("type"), frozenset(it.get("targets", [])))] = it
+    for item in new_rx:
+        prev = old_by_key.get((item.get("type"), frozenset(item.get("targets", []))))
+        if not prev:
+            continue
+        for field in ("llm_actions", "llm_todo", "priority"):
+            if prev.get(field) and not item.get(field):
+                item[field] = prev[field]
+    return new_rx
+
+
+def build_conflict_candidates(project_root: str, inventory: list[dict], domain_map: dict | None = None) -> dict:
     """
     五类冲突静态检测（C1~C5），全部确定性计算，不耗 LLM 上下文。
-    C1/C2 基于 description 关键词；C3 基于常驻 token；C4/C5 基于共享资源引用比对。
+    C1/C2 基于 description 关键词（同域比对 + 跨域高阈值 + 每域 Top-K，防百级 Skill 候选爆炸）；
+    C3 基于常驻 token；C4/C5 基于共享资源引用比对。
+    domain_map: name -> domain_final（来自 classify.json，LLM 已回填；缺省全部视为同域）。
     """
     candidates = {"C1": [], "C2": [], "C3": [], "C4": [], "C5": []}
     active = [s for s in inventory if s.get("status") == "active"]
@@ -1127,6 +1640,10 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
         skill_keywords[skill["name"]] = extract_keywords(desc)
         anti_trigger_map[skill["name"]] = bool(re.search(r'不适用|不要调用|不要', desc))
 
+    # 功能域映射（来自 MED_SORT 的 classify.json domain_final，LLM 已回填）；
+    # 无映射时全部视为同域（兼容 MED_SORT 前直接跑 conflict 的场景）
+    domain_of = domain_map or {}
+
     names = list(skill_keywords.keys())
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
@@ -1141,10 +1658,11 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
                 continue
 
             jaccard = len(intersection) / len(union)
-            # C1 同质冲突：overlap 绝对显著（一方描述长稀释 jaccard 时兜底）
-            # 或 overlap 可观且 jaccard 达标（阈值见集中配置）
-            if len(intersection) >= C1_MIN_OVERLAP or \
-                    (len(intersection) >= C1_OVERLAP_JACCARD and jaccard >= C1_MIN_JACCARD):
+            same_domain = (domain_of.get(a, "未归类") == domain_of.get(b, "未归类"))
+            # C1 同质冲突：仅同功能域才可能功能同质（跨域不判）；
+            # overlap 绝对显著（一方描述长稀释 jaccard 时兜底）或 overlap 可观且 jaccard 达标
+            if same_domain and (len(intersection) >= C1_MIN_OVERLAP or
+                                (len(intersection) >= C1_OVERLAP_JACCARD and jaccard >= C1_MIN_JACCARD)):
                 candidates["C1"].append({
                     "skill_a": a, "skill_b": b, "type": "C1",
                     "jaccard": round(jaccard, 3),
@@ -1152,10 +1670,12 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
                     "keywords": sorted(intersection)[:10],
                     "severity": "candidate"
                 })
-            elif len(intersection) >= C2_MIN_OVERLAP:
-                # C2 意图抢占：非模板词交集达标且至少一方无反触发说明
+            else:
+                # C2 意图抢占：域内交集 ≥4；跨域需更高交集 + Jaccard 下限（不同域抢占信号要更强）
+                c2_hit = (len(intersection) >= C2_MIN_OVERLAP if same_domain
+                          else (len(intersection) >= C2_CROSS_MIN_OVERLAP and jaccard >= C2_CROSS_MIN_JACCARD))
                 no_anti = (not anti_trigger_map.get(a, False)) or (not anti_trigger_map.get(b, False))
-                if no_anti:
+                if c2_hit and no_anti:
                     severity = "high" if len(intersection) >= C2_HIGH_OVERLAP else "medium"
                     candidates["C2"].append({
                         "skill_a": a, "skill_b": b, "type": "C2",
@@ -1163,6 +1683,32 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
                         "keywords": sorted(intersection)[:10],
                         "severity": severity
                     })
+
+    # --- Top-K 降噪（仅 S3 摘要 / S4 极限启用；S1 精细 / S2 标准保留全部真候选，避免小规模漏报）---
+    # 档位规则见 scale_of()：S3 每域每类型 Top-15，S4 收紧到 Top-10。
+    # 口径统一用"活跃 Skill 数"（与 prescribe/report 一致，避免 300 边界附近档位错位）
+    scale = scale_of(len(active))
+    if scale in ("S3", "S4"):
+        top_k = C1_TOP_K_PER_DOMAIN if scale == "S3" else SCALE_S4_TOP_K
+
+        def _domain_of_entry(e):
+            return domain_of.get(e["skill_a"], "未归类")
+
+        _c1 = defaultdict(list)
+        for e in candidates["C1"]:
+            _c1[_domain_of_entry(e)].append(e)
+        candidates["C1"] = []
+        for _dom, _lst in _c1.items():
+            _lst.sort(key=lambda e: e["jaccard"], reverse=True)
+            candidates["C1"].extend(_lst[:top_k])
+
+        _c2 = defaultdict(list)
+        for e in candidates["C2"]:
+            _c2[_domain_of_entry(e)].append(e)
+        candidates["C2"] = []
+        for _dom, _lst in _c2.items():
+            _lst.sort(key=lambda e: e["overlap_count"], reverse=True)
+            candidates["C2"].extend(_lst[:top_k])
 
     # --- C3: 上下文膨胀（常驻加载量超阈值且无 chunk 分层）---
     # 常驻口径 = SKILL.md + load:always 的 chunk 索引（always_load_tokens_est），无该字段回退单体 tokens_est
@@ -1281,6 +1827,10 @@ def main():
     parser.add_argument("project_root", nargs="?", default=None, help="项目根目录（默认当前工作目录）")
     parser.add_argument("params", nargs="*", help="附加参数")
     parser.add_argument("--save", action="store_true", help="将产物落盘到 .medic/（中间产物持久化）")
+    parser.add_argument("--scope", choices=["workspace", "global"], default=None,
+                        help="限定扫描范围（仅 scan 使用；缺省全部）")
+    parser.add_argument("--extra-dir", action="append", default=None,
+                        help="追加用户自定义 Skill 目录（仅 scan 使用，可多次传入，scope 标记为 custom）")
 
     args = parser.parse_args()
     project_root = args.project_root or get_project_root()
@@ -1298,8 +1848,10 @@ def main():
         return
 
     if args.action == "scan":
-        """扫描所有 Skill（--save 落盘 _medic_inventory.json）"""
-        inventory = scan_skills(project_root)
+        """扫描所有 Skill（--save 落盘 _medic_inventory.json；--scope 限定 workspace/global；--extra-dir 追加自定义目录）"""
+        inventory = scan_skills(project_root, args.extra_dir)
+        if args.scope:
+            inventory = [s for s in inventory if s.get("scope") == args.scope]
         if args.save:
             p = save_medic_json(project_root, "_medic_inventory.json", inventory)
             print(json.dumps({"saved": p, "skills_count": len(inventory)}, ensure_ascii=False))
@@ -1330,6 +1882,17 @@ def main():
                 continue
             results.append(classify_skill(skill, project_root))
         if args.save:
+            # 合并写回：保留旧文件（02 已回填）的 domain_final/interaction/lifecycle，
+            # 防止打回重做重跑 --save 时抹掉已确认字段
+            disk_data = None
+            _p = os.path.join(medic_dir(project_root), "_medic_classify.json")
+            if os.path.isfile(_p):
+                try:
+                    with open(_p, 'r', encoding='utf-8') as f:
+                        disk_data = json.load(f)
+                except Exception:
+                    disk_data = None
+            results = merge_classify_with_disk(results, disk_data)
             p = save_medic_json(project_root, "_medic_classify.json", results)
             print(json.dumps({"saved": p, "skills_count": len(results)}, ensure_ascii=False))
         else:
@@ -1339,8 +1902,19 @@ def main():
     if args.action == "conflict":
         """五类冲突静态候选（C1~C5；--save 落盘 _medic_conflicts.json）"""
         inventory = scan_skills(project_root)
-        candidates = build_conflict_candidates(project_root, inventory)
+        candidates = build_conflict_candidates(project_root, inventory, load_domain_map(project_root))
         if args.save:
+            # 合并写回：保留旧文件（03/05 已确认）的 severity/evidence/impact，
+            # 防止打回重做重跑 --save 时抹掉已确认字段（removed_pairs 由 03 按接力棒重新移除）
+            disk_data = None
+            _p = os.path.join(medic_dir(project_root), "_medic_conflicts.json")
+            if os.path.isfile(_p):
+                try:
+                    with open(_p, 'r', encoding='utf-8') as f:
+                        disk_data = json.load(f)
+                except Exception:
+                    disk_data = None
+            candidates = merge_conflicts_with_disk(candidates, disk_data)
             p = save_medic_json(project_root, "_medic_conflicts.json", candidates)
             print(json.dumps({"saved": p, "conflict_candidates": sum(
                 len(v) for k, v in candidates.items() if k != "C4_infra")}, ensure_ascii=False))
@@ -1394,11 +1968,22 @@ def main():
         return
 
     if args.action == "prescribe":
-        """规则处方候选（MED_RX；--save 落盘 _medic_rx.json）"""
+        """规则处方候选（MED_RX；--save 落盘 _medic_rx.json）——冲突矩阵优先读 03 写回版"""
         inventory = scan_skills(project_root)
-        conflicts = build_conflict_candidates(project_root, inventory)
+        conflicts = load_conflicts_merged(project_root, inventory)
         rx = build_prescriptions(project_root, inventory, conflicts)
         if args.save:
+            # 合并写回：保留旧文件（06 已完善）的 llm_actions/llm_todo/priority，
+            # 防止打回重做重跑 --save 时抹掉已写回的精确操作
+            disk_data = None
+            _p = os.path.join(medic_dir(project_root), "_medic_rx.json")
+            if os.path.isfile(_p):
+                try:
+                    with open(_p, 'r', encoding='utf-8') as f:
+                        disk_data = json.load(f)
+                except Exception:
+                    disk_data = None
+            rx = merge_rx_with_disk(rx, disk_data)
             p = save_medic_json(project_root, "_medic_rx.json", rx)
             print(json.dumps({"saved": p, "prescriptions": len(rx)}, ensure_ascii=False))
         else:
@@ -1462,11 +2047,14 @@ def main():
             except OSError as e:
                 print(f"Warning: 归档上次清单失败（历史对比可能缺失或陈旧）: {e}")
         inventory = scan_skills(project_root)
-        classify = [classify_skill(s, project_root)
-                    for s in inventory if s.get("status") == "active"]
-        conflicts = build_conflict_candidates(project_root, inventory)
-        rx = build_prescriptions(project_root, inventory, conflicts)
-        content = build_report(project_root, inventory, classify, conflicts, rx)
+        # 分类统一读磁盘回填版（domain_final/interaction/lifecycle，LLM 已回填），
+        # 与 conflict 的 load_domain_map 同源，避免"附录挂域用静态初值、冲突判定用回填值"的分裂
+        classify = load_classify_merged(project_root, inventory)
+        # 冲突矩阵优先读 03 写回版（severity/evidence/impact 已确认、伪冲突已移除）；无则现场重算
+        conflicts = load_conflicts_merged(project_root, inventory)
+        # 处方优先读 06 写回版（llm_actions 已完善、含 06 补的整改/移除类处方）；无则退化为规则候选
+        rx = load_rx_merged(project_root, inventory, conflicts)
+        content, appendix_files = build_report(project_root, inventory, classify, conflicts, rx)
 
         report_dir = medic_dir(project_root)
         ts_file = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 毫秒级，避免同秒覆盖
@@ -1484,8 +2072,10 @@ def main():
             "report_path": report_path,
             "inventory_path": inv_path,
             "skills_count": len(inventory),
+            "scale": scale_of(len([s for s in inventory if s.get("status") == "active"])),
             "conflict_candidates": conflict_count,
             "prescriptions": len(rx),
+            "appendix_files": appendix_files,
         }, ensure_ascii=False))
         return
 
@@ -1507,7 +2097,8 @@ def main():
                     print(f"Warning: 清理 {f} 失败: {e}")
         kept = sorted(set(os.listdir(report_dir)) | {"_medic_baton.json", "_medic_inventory.json",
                       "_medic_last_inventory.json"} |
-                      {f for f in os.listdir(report_dir) if f.startswith("skill_audit_report_")})
+                      {f for f in os.listdir(report_dir)
+                       if f.startswith("skill_audit_report_") or f.startswith("skill_audit_appendix_")})
         print(json.dumps({"cleaned": cleaned, "count": len(cleaned), "kept": kept}, ensure_ascii=False))
         return
 

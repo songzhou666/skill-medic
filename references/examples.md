@@ -96,7 +96,7 @@
   "C2": [
     {
       "skill_a": "agent-browser",
-      "skill_b": "xbrowser",
+      "skill_b": "skill-browser-helper",
       "type": "C2",
       "overlap_count": 6,
       "keywords": ["浏览器", "自动化"],
@@ -146,7 +146,7 @@
   {
     "type": "add-antitrigger",
     "severity": "medium",
-    "targets": ["agent-browser", "xbrowser"],
+    "targets": ["agent-browser", "skill-browser-helper"],
     "conflict": "C2",
     "rule": "意图抢占：为双方 description 补充'何时不要调用'反触发说明，降低误触发",
     "llm_todo": "给出各 Skill description 的改写建议（精确措辞）"
@@ -159,17 +159,35 @@
 ## 7. report —— 报告落盘
 
 **场景**：装配报告静态骨架并落盘（总是落盘，无需 `--save`；结论区由 AI 在 MED_DEBRIEF 回填）。
+按规模档位输出：S1/S2 完整报告（`appendix_files` 为空）、S3/S4 摘要主报告 + 每域附录（`scale` = S3/S4，`appendix_files` 列出全部附录路径）。
 
 **命令**：`python run.py report <project_root>`
 
-**输出片段**：
+> 实际返回的 `report_path` / `inventory_path` / `appendix_files` 为绝对路径（`os.path.join` 拼接）；下面示例为便于阅读用相对路径写法。
+
+**输出片段**（小规模 S1/S2 档）：
 ```json
 {
   "report_path": "./.medic/skill_audit_report_20260806_134509.md",
   "inventory_path": "./.medic/_medic_inventory.json",
   "skills_count": 11,
-  "conflict_candidates": 39,
-  "prescriptions": 45
+  "scale": "S1",
+  "conflict_candidates": 40,
+  "prescriptions": 50,
+  "appendix_files": []
+}
+```
+
+**输出片段**（大规模 S3/S4 档，`scale` 为 S3 或 S4，附列出各功能域附录）：
+```json
+{
+  "report_path": "./.medic/skill_audit_report_20260808_150140_744.md",
+  "inventory_path": "./.medic/_medic_inventory.json",
+  "skills_count": 361,
+  "scale": "S4",
+  "conflict_candidates": 200,
+  "prescriptions": 184,
+  "appendix_files": ["./.medic/skill_audit_appendix_数据分析报表.md", "./.medic/skill_audit_appendix_项目流程.md"]
 }
 ```
 
@@ -184,9 +202,9 @@
 **输出片段**：
 ```json
 {
-  "added": ["xbrowser", "kdocs"],
-  "removed": ["old-skill"],
-  "changed": ["conspect"]
+  "added": ["skill-a", "skill-b"],
+  "removed": ["skill-c"],
+  "changed": ["skill-d"]
 }
 ```
 

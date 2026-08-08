@@ -25,8 +25,8 @@ IDE 已经把当前所有 Skill 引导给 AI 了，顺着它走，而不是自�
 
 1. workspace 候选目录（全部存在的都收集，按序优先）：`.trae/skills` → `.claude/skills` → `.cursor/skills` → `.codex/skills` → `skills`
 2. 全局候选目录（§9.1，探测不到**不阻断**）：`~/.trae-cn/skills`、`~/.claude/skills`、`~/.cursor/skills`、`~/.trae/skills`、`~/.qclaw/skills`
-3. 用户显式指定的附加目录
-4. **同名 Skill 去重**：workspace 优先，标注 `source` 与 `scope`（workspace / global）
+3. 用户显式指定的附加目录：`run.py scan --extra-dir <path>`（可多次传入），scope 标记为 custom，与 workspace/global 同流程进入清单
+4. **同名 Skill 去重**：workspace 优先，标注 `source` 与 `scope`（workspace / global / custom）
 5. **同源裁决**：同名不同路径的 Skill，默认按 §9.1 去重只保留一个（workspace 优先）；
    重复安装位置由工具记入该条目 `dup_sources`，报告"重复安装"区展示（例：同一 Skill 在
    `.trae/skills` 与 `.claude/skills` 各装了一份 → 建议只保留一份）；
@@ -34,7 +34,7 @@ IDE 已经把当前所有 Skill 引导给 AI 了，顺着它走，而不是自�
    "同源裁决：双版本分别计数 + 理由"（05-auditor 校验），禁止无说明地重复计数
 
 > **CLI 约定**：调用方式、{CLI_DIR} 定位、失败处理见 `references/cli-guide.md`。
-> 扫描结果必须 `--save` 落盘：`python run.py scan <project_root> --save` → `.medic/_medic_inventory.json`。
+> 扫描结果必须 `--save` 落盘：`python run.py scan <project_root> --save [--scope ...] [--extra-dir <path>...]` → `.medic/_medic_inventory.json`。
 
 > **铁律**：任何目录探测不到 → 记录"该范围未覆盖（原因）"，**不阻断**审计，以 available_skills 清单为准继续。
 
@@ -47,7 +47,7 @@ IDE 已经把当前所有 Skill 引导给 AI 了，顺着它走，而不是自�
 3. 静态指标（由 `medic_tools/run.py` 计算）：
    - SKILL.md 字符数、估算 token 数（公式：`ceil(cjk / 1.7 + ascii / 4)`）
    - frontmatter 完整度
-4. **资源依赖声明**（仅字段名/路径，不读值）：环境变量名、config 文件名、DB 表名/库名、baton 路径、MCP 工具名——由 `run.py conflict` 从实现声明文件**通用提取**，不深读业务逻辑
+4. **资源依赖声明**（仅字段名/路径，不读值）：环境变量名、config 文件名、DB 表名/库名、baton 路径、MCP 工具名——由 **MED_CONFLICT 阶段**的 `run.py conflict` 从实现声明文件**通用提取**（本阶段只登记目录结构标志，不执行 conflict；该项指标在 03 精析时才获得）
 
 ### 异常 Skill 处理
 
@@ -84,4 +84,4 @@ IDE 已经把当前所有 Skill 引导给 AI 了，顺着它走，而不是自�
 > **LLM 层合并**：01-inventory-agent 必须把 available_skills 清单（IDE 注入）与脚本扫描结果合并——
 > 脚本扫到的但 IDE 清单没有的，标"仅文件系统可见"；IDE 清单有的但脚本没扫到的，以 IDE 为准并补录。
 > **合并结果必须用 IDE Write 工具覆盖写回 `.medic/_medic_inventory.json`**（保留脚本产出的全部字段，追加 source/scope 标注），禁止只留在对话里。
-> **补录限制**：`run.py` 的 categorize/conflict/prescribe/report 均以磁盘扫描为准（重扫文件系统），IDE 补录项若磁盘不可见，下游命令不会自动带上——补录项由 07-reporter 在报告第 3 部分手工补入并标注"IDE 清单独有"。
+> **补录限制**：`run.py` 的 categorize/conflict/prescribe/report 均以磁盘扫描为准（重扫文件系统），IDE 补录项若磁盘不可见，下游命令不会自动带上——补录项清单随阶段产物传给 02~07，由 02 分类表、07 报告第 3 部分与各功能域附录中手工补入并标注"IDE 清单独有"。

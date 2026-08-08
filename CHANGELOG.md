@@ -1,5 +1,148 @@
 # CHANGELOG
 
+## v0.4.18 (2026-08-08)
+
+### 七轮整体检查修复（全新维度：执行视角全链路走查 / 全量代码审计 / 真实环境全流程实测 / SKILL.md+chunk 全文审查）
+
+- **P0 同名去重 active 优先**：`scan_skills` 原"先到先得"，broken 版本先收录时 active 版本被当"重复安装"吞掉，
+  可用 Skill 直接从审计消失 → 重构为 `register()` 注册函数：同名 Skill 新条目为 active 而旧条目为 broken 时
+  active 提升为主条目、旧 broken 降级记入 dup_sources（broken/read-error/active 三分支统一走 register）
+- **P1 报告域口径分裂**：report 内部 conflicts 读磁盘 classify.json 的 domain_final、附录/分类却用现场重算的
+  domain_hint → 新增 `load_classify_merged`（读磁盘回填版 domain_final/interaction/lifecycle，损坏时退化现场重算），
+  report 全部改走 merged；build_report 第 2 部分域分布也改 domain_final 优先
+- **P1 prescribe 写回版脱节**：prescribe 现场重算静态候选、不读 03 写回版（伪冲突/severity 修正全丢）→
+  新增 `load_conflicts_merged`（优先读 03 写回版 `_medic_conflicts.json`），prescribe/report 统一接入
+- **P1 collect_skill_text 截断顺序**：工具层 py 文件被长正文截掉（C4/C5 核心信号源丢失）→ 工具层排最前并优先保留、
+  截断时优先截正文；`os.listdir(tp)` 补 try/except OSError（原来会炸整个 conflict/report）
+- **P1 附录 severity 静态初值**：run.py 生成的附录冲突表 severity 是静态初值（C1 显示"待确认"）→
+  07-reporter 逐域回填时按写回版覆盖严重度列（与主报告第 5 部分一致）
+- **P1 02 缺 categorize 执行指令**：MED_SORT 起步无命令执行者 → 02-classifier 补"先执行 run.py categorize <root> --save"
+- **P1 C1 双授权边界**：03-conflict 第 7 条新增——C1 保留 `severity="candidate"`，高/中定级由 05 审核闸门①
+  依据评分差补齐（唯一责任人），03 只补 evidence/impact 不自行定 C1 级别；C2~C5 由 03 定级
+- **P1 需求文档 §6.2 异常判定矛盾**：SKILL.md 缺失/编码无法识别 → broken；frontmatter 缺失/解析失败 → 仍 active
+  （fix-frontmatter 处方）；目录不可读 → 整目录跳过；编码顺序 UTF-8（含 BOM）→ GBK；§13 验收 12 同步
+- **P2 流程闭环**：baton-protocol 控制规则 5 补"打回 MED_CONFLICT 清空 `batch.conflict_pairs_done`"
+  （03 全量重核写回版矩阵），00-master 与需求文档 §6.3 同步
+- 验证：py_compile 通过；report e:/skill_example（S1 档）40 候选 appendix_files=[] 正常
+
+### 收敛验证轮修复（三路并行子 Agent：承诺-落地审查 / 修复回归验证 / 跨轮修复反查）
+
+- **收敛结论先行**：跨轮反查 v0.4.11~v0.4.18 共 30+ 条修复声明**全部真实落地、0 回退**；
+  第 7 轮 10 项修复 9.5 项落地无回归——唯一遗留的 0.5 项是本轮修复的核心（见下）
+- **P1 merge_conflicts_with_disk 的 severity 保留失效（第 7 轮引入，本轮回访坐实）**：
+  静态候选 severity 恒非空（C1=candidate、C2~C5=规则初值），"新值空缺才回填"条件恒不生效 →
+  03/05 已确认的定级（C1 高/中、C2~C5 修正值）重跑 `conflict --save` 全部丢失回静态初值 →
+  改为 **severity"旧值非 candidate 即覆盖"**（candidate 视为未确认占位不覆盖），evidence/impact 保持
+  "新值空缺回填"；构造性验证 C1(candidate→high) 与 C2(high→low) 重跑均保留 ✅
+- **P1 严格模式承诺无差异规则（SKILL.md 承诺但全库零落地）**：新增 chunk-01"严格模式"差异表
+  （评分强证据才给分/低证据一律待确认/05 抽检 ≥50%/S1~S4 冲突全量精析/定级阈值不可变），
+  00-master 路由传给 04/05，05-auditor 抽检率补严格档
+- **P1 自定义扫描目录无落地路径（文档承诺 custom 但 run.py 无参数）**：scan 新增可重复参数
+  `--extra-dir <path>`，find_skills_dirs 追加 (path,"custom")；cli-guide/chunk-02/01-inventory 同步
+  执行指令；实测 --extra-dir 追加 7 条 custom ✅（同名被去重入 dup_sources，符合设计）
+- **P2 措辞修复**：chunk-01 残留节号"7.2/7.3"→"7.2/附录"；需求文档术语表"历史对比（报告第 7 部分）"→"第 8 部分"；
+  examples.md 虚构名 xbrowser → skill-browser-helper
+- 验证：py_compile 通过；构造性验证 severity 保留（C1/C2）+ --extra-dir 生效全部通过
+
+### 八轮整体检查修复（四路并行子 Agent：三向一致性矩阵 / 真实环境字段级实测 / 数据流闭环 / 新手可执行性走查）
+
+- **P1 report 不读 `_medic_rx.json`（06 写回版处方整体丢失，本轮最严重缺陷）**：report 命令重新走
+  `build_prescriptions` 生成静态候选渲染 7.2 表与附录，06 完善的 `llm_actions`、severity 调整、
+  以及依据评分补的"整改/L0 移除"类处方全部丢失 → 新增 `load_rx_merged`（优先读 06 写回版 rx.json，
+  缺失/损坏才退化规则候选），report 接入；07 回填"精确操作"按 `type + targets` 匹配 llm_actions（禁止按行序硬填）
+- **P1 `--save` 无条件覆盖写回版（打回重做抹掉已确认字段）**：categorize/conflict/prescribe 的 `--save`
+  直接覆盖目标文件，03/02/06 打回重做重跑 `--save` 时已确认的 domain_final/severity/evidence/impact/llm_actions
+  全丢 → 新增 `merge_classify_with_disk` / `merge_conflicts_with_disk` / `merge_rx_with_disk`（按 name/对键
+  保留旧文件确认字段，新候选只补充静态初值）；03/06 提示词补"打回重做禁止重跑 --save，直接读写回版"
+- **P1 承诺能力无执行路径（范围限定/专项模式/增量审计）**：SKILL.md 承诺"只看 workspace/只查冲突/增量审计"
+  但 scan 无 scope 参数、专项模式与 phase-protocol"禁止跳步"互斥、增量审计无流程 → scan 新增 `--scope`
+  过滤；chunk-01 新增专项裁剪表 + 增量审计流程；phase-protocol"跳步禁止"改为"全量禁跳、专项按裁剪表"；
+  00-master 初始化按用户输入写 `meta.scan_scope`、01 回报实际覆盖范围由主控校正；需求文档 §6.2.1 同步
+- **P1 MED_DEBRIEF 续跑矛盾**：续跑指令 1b"按 appendix_done 续填"与 1d"从第一个 ⬜ 阶段继续"并存，
+  且 07 首步重跑 `run.py report` 会覆盖已回填附录 → 明确"DEBRIEF 续跑禁止重跑 report，只读 appendix_done
+  续填剩余域"（00-master 启动流程 1d 特例 + chunk-01 + baton-protocol 规则 4 + 07-reporter）
+- **P1 cleanup 归属矛盾**：baton-protocol 把 cleanup 算 07 产出，00-master/07-reporter 归 00-master →
+  统一"收口完成后由 00-master 最后执行 cleanup"（baton-protocol 规则 7 + 07-reporter MED_CLOSE）
+- **P1 removed_pairs 无消费者**：03 伪冲突移除理由回报后 05 从不读取 → 05-auditor 审核范围新增
+  "读取 `batch.removed_pairs` 抽检，误移真实冲突 → BLOCK-B 打回 03 恢复"
+- **P1 C1 定级无闸门强制**：05 是 C1 定级唯一责任人但无 gate 验证 → phase-protocol 闸门①产出验证补
+  "C1 严重度已补齐非 candidate"；评分缺失的 C1 对保持 candidate 标注"待确认"（05-auditor 补充）
+- **P1 02 的 interaction/lifecycle 修正无落盘契约**：02 只字面要求回填 domain_final，下游却把三者当回填字段
+  消费 → 02 写回契约扩展为 domain_final/interaction/lifecycle 三维 + evidence
+- **P2 批量**：03 写回保留 keywords/jaccard/resource（报告冲突点列依赖）；03 断点续跑补 conflict_pairs_done
+  续批指令；chunk-05 删"跨组冲突对分批"残留（属 03 职责）；chunk-05 写回铁律补"保留文件内其他 Skill 条目"；
+  prescriptions_outstanding 标注方式定义（rx 条目补 `outstanding: true`）；07 补录项扩展进各功能域附录；
+  需求文档 §6.3 last_inventory 示例改 `_medic_last_inventory.json`；常量名 `C1/C2_TOP_K_PER_DOMAIN`→`C1_TOP_K_PER_DOMAIN`
+  （chunk-04/需求 §5.3/CHANGELOG 同步）；README 旧词"报告自动分卷"→"摘要模式"；run.py docstring scan 补 --save/--scope、
+  diff 注释空格；chunk-03/06/07/00-master/07-reporter 命令补 `<root>`；scale 双轨加校正规则（report 实际输出为准）
+- 验证：py_compile 通过；真实环境 11 命令全链实测（S1 档 16 候选 26 处方 0 附录）；构造性验证
+  load_rx_merged（插入 LLM 补充处方 → report 27 条且正文含该条）、--save 合并保护（llm_actions/priority/
+  domain_final 重跑保留）全部通过
+
+### 四档规模分级策略（少则精、多则省，不笼统套一套方案）
+
+- **新增 `scale_of()` 档位函数**：按活跃 Skill 数返回 S1（≤20）/ S2（21~80）/ S3（81~300）/ S4（>300）
+- **S1 精细 / S2 标准**：conflict **不做 Top-K 降噪**（保留全部真候选，避免小规模漏报）；
+  报告为完整 9 部分全量明细（无附录）
+- **S3 摘要（81~300）**：C1/C2 每域每类型 Top-15 降噪（`C1/C2_TOP_K_PER_DOMAIN`）；
+  报告切换摘要模式 + 每功能域附录
+- **S4 极限（>300）**：Top-K 收紧到每域每类型 10（`SCALE_S4_TOP_K`）；
+  **处方批量聚合**（`_aggregate_rx_for_large_scale`：maintain/fix-frontmatter/fix-or-archive/slim
+  同型合并为一条、add-antitrigger 按 Skill 聚合）——实测 361 Skill：候选 200 组、处方从数百条降到 184 条
+- **report 输出与报告元信息标注规模档位**（JSON `scale` 字段 + "规模档位"行），AI 据此决定回填范围
+- 文档同步：chunk-04/chunk-07 规模分级策略、03-conflict/07-reporter 档位规则、需求文档 §5.3/§6.2.1/§8.2
+- 验证：py_compile 通过；三档实测（11 Skill→S1 全量 40 候选无降噪；150+ Skill→S3 294 候选；
+  361 Skill→S4 200 候选 + 处方聚合 184 条）；压测环境已清理；版本 0.4.17 → 0.4.18
+
+### 三子 Agent 交叉审查修复（代码 / 流程机制 / 文档一致性）
+
+- **代码**：档位口径统一为"活跃 Skill 数"（conflict 原用 compare_skills 含 broken-design_doc，300 边界会档位错位）；
+  删除 `REPORT_FULL_THRESHOLD` 死代码（改用 `SCALE_S2_MAX`）；聚合处方**跨域挂到每个命中域附录**
+  （原来只挂第一个域）；broken 处方兜底——"未归类"域强制生成附录（实测 362 Skill 含 broken 时附录完整）
+- **流程机制**：S3/S4 附录纳入闸门验证（phase-protocol MED_DEBRIEF）与断点续跑（接力棒 `batch.appendix_done`）；
+  接力棒 `meta` 新增 `scale` 档位字段（00-master MED_ROSTER 后写入）；05-auditor 增加附录核查
+  （BLOCK-E 覆盖附录未回填列/残留模板语/分布不一致）；03 写回铁律澄清（保留矩阵内的每对带齐字段、
+  伪冲突移除记 skipped_groups）；06/chunk-06 补"S4 聚合处方逐 Skill 给精确操作"；07 补逐域回填批次规则
+- **文档一致性**：需求文档标题/文末版本号 v0.4.16→v0.4.18（P0）；§16.5 cleanup 保留清单补附录；
+  chunk-07 补 S4 Top-10 降噪口径与"merge/boundary/schedule 保持逐对"；examples.md report 输出补
+  scale/appendix_files 两档示例、diff 示例泛化；"大报告模式/规模防线"旧术语全面清扫；cli-guide/00-master cleanup 补附录保留
+- 验证：py_compile 通过；S1（11 Skill 全量 40 候选）+ S4（362 Skill 候选 200、处方 185、broken 处方入附录）
+  双档实测；版本号全检（SKILL.md/manifest/README/需求文档 = 0.4.18）
+
+### 四子 Agent 二轮交叉审查修复（代码 / 流程机制 / 文档一致性 / 端到端实跑）
+
+- **代码**：冲突挂域改为**按双方域各挂一次**（跨域 C2 的 skill_b 侧附录可追溯）；摘要档 C3 占资源截断 Top-20
+  （完整清单在附录）；删除 `C2_TOP_K_PER_DOMAIN` 死常量（C1/C2 共用）；fix-or-archive 聚合逐 Skill 保留
+  broken_reason；附录/分类表域口径统一 domain_final 优先；第 3 部分域列表与附录列表路径格式统一；
+  rx_sev_plain 补 candidate→待确认
+- **流程机制**：`skipped_groups` 双语义冲突消除——03 伪冲突移除改用新字段 `batch.removed_pairs`
+  （记"对 + 移除理由"供 05 抽检），skipped_groups 归还 04 批进度专用；**打回重做进度重置**规则
+  （打回 MED_DEBRIEF 清空 appendix_done、打回 MED_VITAL 清空 groups_done，防止按旧进度跳过问题，
+  附录问题可自动闭环）；附录处方表新增"精确操作"列承载 S4 聚合逐 Skill 指引（07 读 rx.json 的 llm_actions 回填）
+- **文档一致性**：需求文档 §6.3 接力棒 JSON 补 scale/appendix_done/removed_pairs 字段与 3 条控制规则；
+  §6.1 MED_DEBRIEF 行补附录、§7 元信息补规模档位、§6.2.1 旧词"报告分卷"→"摘要模式与附录"；
+  phase-protocol ">80" 旧符号→S3/S4 档（81~300/>300）；chunk-01/chunk-07 补附录续跑与逐域批次；
+  examples S1 档数值对齐（39→40）、路径口径注记；README/faq-deep 旧术语清扫；chunk-06 聚合规则枚举补全
+- **端到端实跑**（独立子 Agent 实测）：S1（11 真实 Skill）完整报告 40 候选无附录 ✅；S4（350 模拟+1 broken+11 全局）
+  摘要报告 + Top-10 降噪（候选 226）+ 处方聚合（219）+ broken 兜底入"未归类"附录 ✅；cleanup 白名单保留附录 ✅
+- 验证：py_compile 通过；版本号全检 = 0.4.18
+
+## v0.4.17 (2026-08-08)
+
+### 规模防线：百级 Skill（100+/461 级）场景全面收敛
+
+- **冲突候选降噪（O(N²) → 域 × Top-K）**：C1 同质冲突**仅同功能域比对**（跨域不做 C1）；C2 跨功能域对需更高信号
+  （交集 ≥ 8 且 Jaccard ≥ 0.15）；C1/C2 候选按功能域分组后**每域每类型只保留 Top-15 组**
+  （`C1/C2_TOP_K_PER_DOMAIN`，域映射取 `_medic_classify.json` 的 `domain_final`）。实测 150+ Skill 压测：
+  候选收敛到 294 组（未降噪 O(N²) 约 1.1 万对）
+- **报告分卷（>80 自动摘要模式）**：活跃 Skill > `REPORT_FULL_THRESHOLD=80` 时主报告只保留汇报层 +
+  Top 20 冲突（`REPORT_TOP_CONFLICTS`）+ Top 30 处方（`REPORT_TOP_RX`），完整清单/分类/冲突/评分/处方
+  按功能域拆多份附录 `skill_audit_appendix_<域>.md`（report 输出 JSON 含 `appendix_files`；cleanup 保留附录）
+- **职责同步**：chunk-04 量化阈值表（同域 C1 + 跨域 C2 高阈值 + Top-K）、chunk-07 大报告模式、
+  03-conflict 规模复核规则（低严重度/泛词伪冲突标注后跳过）、07-reporter 附录回填范围、
+  需求文档 §5.3 / §6.2.1 / §8.2 全部同步
+- 验证：py_compile 通过；150+ Skill 压测环境已清理；真实环境（11 Skill）回归——小规模报告明细层完整、C2 真实冲突未误伤；版本 0.4.16 → 0.4.17
+
 ## v0.4.16 (2026-08-08)
 
 ### 六轮回归收敛修复（2 子 Agent：v0.4.15 回归验证 / 残余问题排查）+ 完整端到端测试

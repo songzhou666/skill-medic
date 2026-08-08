@@ -13,7 +13,7 @@
 
 ## 分类流程
 
-1. 读取 `.medic/_medic_classify.json`（`run.py categorize --save` 产出，含静态初值 `domain_hint` / `interaction` / `lifecycle`）
+1. 读取 `.medic/_medic_classify.json`（`run.py categorize <root> --save` 产出，含静态初值 `domain_hint` / `interaction` / `lifecycle`）
 2. LLM 逐 Skill 语义判定功能域（`domain_final`），参考但不盲从 `domain_hint`：
    - `domain_hint` 有值且语义吻合 → 采纳，evidence 沿用 + 可补充
    - `domain_hint` 有值但语义不符 → 覆盖，必须记录"初值 → 修正值 + 理由"
@@ -68,6 +68,7 @@
 每个 Skill 输出三维标签 + evidence，形如：
 `example-skill | 文档生成 · 纯提示词型 · 活跃维护 | evidence: description L1"生成操作手册"`
 
-**写回铁律**：LLM 判定并回填的 `domain_final` **必须覆盖写回 `.medic/_medic_classify.json`**
-（用 IDE Write 工具更新该 JSON 的 `domain_final` 字段），禁止只留在对话里；
-下游 04-scorer（分组）/ 03-conflict（分组）/ 06-synthesizer / 05-auditor 统一读写回版。
+**写回铁律**：LLM 判定并回填的三维——`domain_final` / `interaction` / `lifecycle`（含修正后的交互模型与
+生命周期）**必须覆盖写回 `.medic/_medic_classify.json`**（用 IDE Write 工具更新该 JSON 的三个字段，
+交互模型与生命周期的修正结论同样要落盘，下游 `load_classify_merged` 把三者都当"LLM 回填字段"消费），
+禁止只留在对话里；下游 04-scorer（分组）/ 03-conflict（分组）/ 06-synthesizer / 05-auditor 统一读写回版。

@@ -1,7 +1,7 @@
 ---
 name: skill-medic
 display_name: SkillMedic — Skill 健康检查与冲突检测
-version: 0.4.16
+version: 0.4.18
 description: 检查你安装的所有 AI Skill：列出完整清单、找出内容重复或互相冲突的 Skill、评估每个是否成熟可靠，并告诉你怎么处理（放心用/合并/删除）。当用户问"我有哪些 skill / 哪些重复了 / skill 有没有问题 / 该留哪个"时调用。创建新 Skill、单体质量自检、C 盘清理、代码审查或安全扫描、纯知识问答时不要调用。
 tags: [skill-engineering, audit, conflict-detection, scoring, inventory]
 language: zh-CN
@@ -55,7 +55,7 @@ MED_SCOPE → MED_ROSTER → MED_SORT → MED_CONFLICT → MED_VITAL → MED_RX 
 | MED_CONFLICT | 冲突检测 | 全量静态比对 + 按分组 LLM 确认证据 | 冲突矩阵 + 证据 |
 | MED_VITAL | 评分 | 按分组批处理八维打分 | 评分表（含证据） |
 | MED_RX | 综合研判 | 冲突矩阵 × 评分 → 处方建议 | 处方清单 |
-| MED_DEBRIEF | 报告输出 | 生成并落盘检查报告 | 检查报告 |
+| MED_DEBRIEF | 报告输出 | 生成并落盘检查报告（S3/S4 档含各功能域附录） | 检查报告 + 附录 |
 | MED_CLOSE | 完成 | 汇总统计、清理临时文件 | 完成摘要 |
 
 ---
@@ -160,10 +160,13 @@ MED_SCOPE → MED_ROSTER → MED_SORT → MED_CONFLICT → MED_VITAL → MED_RX 
 
 ## 定制化参数（触发时可传）
 
-- `"只看 workspace 的 skill"` → 范围限定 workspace
+- `"只看 workspace 的 skill"` → 范围限定 workspace（`run.py scan --scope`）
 - `"增量审计"` → 对比上次清单，只精析新增/变更项
 - `"只查冲突"` / `"只打分"` → 专项模式，跳过其他阶段
 - `"严格模式"` → 评分/审核从严（低证据一律标注待确认）
+
+> 专项模式/增量审计/范围限定的**具体执行路径（阶段裁剪表与闸门豁免）见 chunk-01"专项模式/增量审计"节**，
+> 00-master 按裁剪表路由；三者的承诺能力均有落地流程，禁止"说了不做"。
 
 ## 常见问题 FAQ
 

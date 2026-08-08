@@ -40,7 +40,7 @@ python run.py <action> <project_root> [params] [--save]
 | action | 命令 | 产物（--save） | 阶段 |
 |--------|------|---------------|------|
 | ping | `python run.py ping <root>` | — | MED_SCOPE |
-| scan | `python run.py scan <root> --save` | `.medic/_medic_inventory.json` | MED_ROSTER |
+| scan | `python run.py scan <root> --save [--scope workspace\|global] [--extra-dir <path>...]` | `.medic/_medic_inventory.json`（--scope 限定扫描范围，用户限定"只看 workspace/global"时使用；--extra-dir 追加用户自定义 Skill 目录，可多次传入，scope 标记为 custom） | MED_ROSTER |
 | analyze | `python run.py analyze <root> <skill>` | —（skill 支持 绝对路径 / 相对路径 / 目录名） | MED_ROSTER |
 | categorize | `python run.py categorize <root> --save` | `.medic/_medic_classify.json` | MED_SORT |
 | conflict | `python run.py conflict <root> --save` | `.medic/_medic_conflicts.json` | MED_CONFLICT |
@@ -48,7 +48,7 @@ python run.py <action> <project_root> [params] [--save]
 | prescribe | `python run.py prescribe <root> --save` | `.medic/_medic_rx.json` | MED_RX |
 | report | `python run.py report <root>` | `.medic/skill_audit_report_*.md` + inventory | MED_DEBRIEF |
 | diff | `python run.py diff <root> [last_inventory]` | —（缺省用 `.medic/_medic_last_inventory.json`） | 增量模式 |
-| cleanup | `python run.py cleanup <root>` | 白名单清理临时中间产物（classify/conflicts/scores/rx/review；**保留 `_medic_baton.json` / `_medic_inventory.json` / `_medic_last_inventory.json` 与历史报告**——断点续跑 / 增量模式 / 历史对比的基础） | MED_CLOSE |
+| cleanup | `python run.py cleanup <root>` | 白名单清理临时中间产物（classify/conflicts/scores/rx/review；**保留 `_medic_baton.json` / `_medic_inventory.json` / `_medic_last_inventory.json`、历史报告与 S3/S4 档附录文件 `skill_audit_appendix_*.md`**——断点续跑 / 增量模式 / 历史对比的基础） | MED_CLOSE |
 
 > **中间产物必须 --save 落盘**：每个阶段结束后，确认对应 `_medic_*.json` 已生成；
 > 产物缺失即阻断，禁止跳过落盘直接进入下一阶段。

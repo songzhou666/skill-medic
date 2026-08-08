@@ -9,9 +9,9 @@
 1. 读取 `.medic/_medic_classify.json`，以功能域 `domain_final` 分组为批次，每组 ≤3 个 Skill
 2. 调用 `medic_tools/run.py score <root> <skill> --save`（CLI 约定见 references/cli-guide.md），信号累积落盘 `.medic/_medic_scores.json`
 3. 对照八维细则逐维打分 + 证据 + 扣分定位
-4. **写入结构（铁律）**：`.medic/_medic_scores.json` 用 IDE Write 工具**先读后改**，保留 CLI 已写的
-   该 Skill 顶层信号块（`{skill_base: {name, status, dim1...}}`），把 LLM 打分合并进该条目的
-   `llm_scores` 键（`llm_scores: {score, level, per_dim, evidence}`），**禁止**用列表结构或
+4. **写入结构（铁律）**：`.medic/_medic_scores.json` 用 IDE Write 工具**先读后改**，保留文件中**全部既有条目**
+   （其他 Skill 的累积分数不可丢，否则下一次 `run.py score` 读-改-写会损坏备份重建），把 LLM 打分合并进
+   目标 Skill 条目的 `llm_scores` 键（`llm_scores: {score, level, per_dim, evidence}`），**禁止**用列表结构或
    整文件覆盖/改顶层键名（否则下一次 `run.py score` 读-改-写会损坏备份重建、丢失已累积分数）
 5. **批间进度不写接力棒**：每批完成后把 `groups_done / current_group` 回报给 00-master，
    由主控代写接力棒 `batch` 段（单点写；子 Agent 禁止直接改接力棒）

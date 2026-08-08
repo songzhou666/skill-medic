@@ -7,12 +7,17 @@
 ## 执行规则
 
 ### MED_SCOPE
+0. **环境自检**：先执行 `run.py ping <root>` 确认项目根可读、Skill 目录可探测（不可用时记录告警但不阻断）
 1. **第一数据源 = IDE 注入的 available_skills 清单**（AI 上下文中的 name + description），
    顺着 IDE 引导走，不自己猜路径
-2. 文件系统扫描（`run.py scan`）多编辑器兼容：workspace 候选目录（.trae/.claude/.cursor/.codex/skills 等）
-   + 全局候选目录（~/.trae-cn/skills 等）
+2. 文件系统扫描（`run.py scan [--scope workspace|global] [--extra-dir <path>...]`）多编辑器兼容：workspace 候选目录（.trae/.claude/.cursor/.codex/skills 等）
+   + 全局候选目录（~/.trae-cn/skills 等）；用户限定范围（如"只看 workspace"）时用 `--scope` 过滤；
+   用户显式指定自定义 Skill 目录（如"再扫一下 D:/my-skills"）时用 `--extra-dir` 追加（scope 标记为 custom，
+   与 workspace/global 同流程进入清单）
 3. 任何目录探测不到 → 记录"该范围未覆盖（原因）"，**不阻断**，以 available_skills 为准
 4. zip 备份标注为"备份归档"
+5. **范围回报（铁律）**：MED_SCOPE 结束后把**实际覆盖范围**（workspace/global/自定义）回报给 00-master，
+   由主控校正接力棒 `meta.scan_scope`（初始化时是用户输入的初值，这里更新为实际值，防止闸门拿占位值"假通过"）
 
 ### MED_ROSTER（铁律：禁止读 SKILL.md 正文全文）
 1. frontmatter 字段与目录结构标志统一由 `medic_tools/run.py scan <root> --save` 一次性产出
@@ -24,7 +29,10 @@
 5. **合并结果写回（铁律）**：合并后的全量清单**必须用 IDE Write 工具覆盖写回
    `.medic/_medic_inventory.json`**（保留脚本产出的全部字段，追加 source/scope 标注），禁止只留在对话里
 6. **补录限制**：`run.py` 的 categorize/conflict/prescribe/report 均以磁盘扫描为准（重扫文件系统），
-   IDE 补录项若磁盘不可见，下游命令不会自动带上——补录项由 07-reporter 在报告第 3 部分手工补入并标注"IDE 清单独有"
+   IDE 补录项若磁盘不可见，下游命令不会自动带上——**补录项清单（name + description + 位置）随阶段产物传给 02~07**，
+   由 02 分类表、07 报告第 3 部分与各功能域附录中手工补入并标注"IDE 清单独有"（数据源 = 本阶段合并清单，非 AI 记忆）
+7. **analyze 的使用场景**：`run.py analyze <root> <skill>` 是单 Skill 静态指标深挖命令，仅当
+   **需要复核单个 Skill 的字段明细**（如评分证据定位、异常 Skill 排查）时按需调用，非 MED_ROSTER 必跑项
 
 ### 分析深度边界（铁律）
 只做抽象层：识别类型、看关系、查体积、提取资源依赖**字段名/路径**。

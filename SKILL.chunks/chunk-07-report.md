@@ -57,11 +57,43 @@
    **定级规则必须引用 chunk-05 固定阈值（L3≥80 / L2 55~79 / L1 30~54 / L0<30），禁止自创阈值**（05-auditor BLOCK-E 核对）
 ```
 
+## 规模分级策略（§6.2.1，少则精、多则省）
+
+> 按活跃 Skill 数自动切换分析深度（`scale_of()`），不笼统套一套方案。报告输出 JSON 的 `scale` 字段
+> 与元信息"规模档位"行标明当前档位，07-reporter 据此决定回填范围。
+
+- **S1 精细（≤20）**：完整报告（9 部分全量明细，无附录）——每 Skill 深读、逐冲突核对
+- **S2 标准（21~80）**：完整报告（无附录）——分批精析
+- **S3 摘要（81~300）**：候选每域每类型 Top-15 降噪；主报告 = 汇报层全量 + 按功能域聚合清单 +
+  Top 20 冲突（`REPORT_TOP_CONFLICTS`）+ Top 30 处方（`REPORT_TOP_RX`）；
+  完整明细按功能域拆附录 `skill_audit_appendix_<域>.md`（`run.py report` 自动生成）
+- **S4 极限（>300）**：报告结构与 S3 相同（摘要主报告 + 每域附录），但候选降噪收紧到**每域每类型
+  Top-10**（`SCALE_S4_TOP_K`），且处方已批量聚合（`_aggregate_rx_for_large_scale`：
+  maintain/fix-frontmatter/fix-or-archive/slim 同型合并为一条、add-antitrigger 按 Skill 聚合；
+  merge/boundary/schedule 保持逐对不聚合），处方条目数大幅下降（实测 361 Skill：184 条）
+
+**回填范围**：S1/S2 回填主报告全部回填区；S3/S4 除主报告回填区外，07-reporter 必须为**每份附录**
+补上"影响你什么"、"通俗评估"与"精确操作"列（附录里的表格与主报告同样遵守"零场外话"铁律）；
+"精确操作"列对聚合处方须逐个 target 给出（读 `.medic/_medic_rx.json` 的 `llm_actions`）；
+健康度分布条**必须**从各附录评分汇总推导，禁止另写一套。
+
+**附录行 ↔ rx.json 匹配规则（"精确操作"列回填的依据）**：`run.py report` 已改为**优先读
+`_medic_rx.json` 写回版渲染**（非静态重算），附录行与 rx 条目一一对应；07 回填"精确操作"时按
+**`type + targets`**（处方类型 + 目标 Skill 集）在 rx.json 中定位对应条目取 `llm_actions`——
+模板行与 rx 条目同源，匹配键稳定，禁止按"行序"硬填（rx 条目顺序可能与表格排序不同）。
+
+**S3/S4 逐域回填批次规则**（与 04 批处理同一防线）：每功能域附录一批，批内只读该域的
+conflicts/scores/rx 子集，正文预算 ≤10k token；每完成一域回报 00-master 写入接力棒
+`batch.appendix_done`（断点续跑从未完成域继续）；全部域完成后再回填主报告汇报层；
+被打回重做（gate3 BLOCK-E）时全量重填，不受 appendix_done 限制。
+
 ## 输出动作
 
-- 强制 `medic_tools/run.py report` 落盘 `.medic/skill_audit_report_{时间戳}.md`（目录自动创建）
+- 强制 `medic_tools/run.py report <root>` 落盘 `.medic/skill_audit_report_{时间戳}.md`（目录自动创建）
 - 同时落盘 `.medic/_medic_inventory.json`（本次清单）；**把旧清单归档为 `.medic/_medic_last_inventory.json`**
   （增量 diff / 历史对比的单一数据源，report 与 diff 都读它）
+- S3/S4 档自动落盘各功能域附录 `skill_audit_appendix_*.md`，report 输出 JSON 的
+  `appendix_files` 字段列出全部附录路径；主报告第 3 部分列出附录文件列表
 - 主回复内同步输出完整报告（Markdown）
 - 不写数据库
 

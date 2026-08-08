@@ -6,7 +6,7 @@
 
 1. **分组键 = `domain_final`**（02-classifier 的 LLM 语义判定结果，非静态 `domain_hint`）：
    - 读取 `.medic/_medic_classify.json`，用 `domain_final`（LLM 已回填）或 `domain_hint`（未回填时兜底）分组
-2. 每组 ≤3 个 Skill 成一批；跨组冲突对单独成批（≤3 对/批）
+2. 每组 ≤3 个 Skill 成一批（跨组冲突对的精析属于 MED_CONFLICT 阶段 03 的活，评分批不处理冲突对）
 3. 每批正文估算预算 ≤10k token；单 Skill 超限 → 分段抽样（每段 ≤5k、最多 3 段）
 4. 批间进度**不写接力棒**：每批完成后回报 00-master，由主控代写 `batch` 段（单点写）
 5. 失败隔离：单批失败自动重试 1 次，仍失败标记 skip 继续，收尾汇总未完成批
@@ -18,8 +18,8 @@
    - 只做抽象信号检测，不读业务逻辑、不读配置值
    - `--save` 累积落盘 `.medic/_medic_scores.json`
 2. LLM 对照八维细则，**结合静态信号 + 抽样正文**逐维打分 + 证据 + 扣分定位；
-   **打分结果必须用 IDE Write 工具写回 `.medic/_medic_scores.json`**（保留 CLI 已写的该 Skill 顶层信号块
-   `{skill_base: {name, status, dim1...}}`，把 LLM 打分追加到该条目的 `llm_scores` 键——
+   **打分结果必须用 IDE Write 工具写回 `.medic/_medic_scores.json`**（先读后改：**保留文件内全部既有条目**
+   与其他 Skill 的累积分数，仅更新目标 Skill 条目并追加 `llm_scores` 键——
    `llm_scores: {score, level, per_dim, evidence}`，**禁止整文件覆盖或改顶层键名**，
    否则下一次 `run.py score` 读-改-写会损坏备份重建、丢失已累积分数）
 3. 05-auditor-agent 抽查 ≥30% Skill

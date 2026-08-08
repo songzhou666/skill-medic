@@ -10,12 +10,29 @@
    补全空占位（1.1 分级名单 / 1.2 TOP 榜 / 1.3 / 白话导读 / 7.1 使用建议）；最终报告正文**不得残留**
    "例：/LLM 回填/AI 回填/回填区"等任何模板指导语，也不得残留未替换的"（）"空占位。
 1. 汇总各阶段产物为完整报告（双层：元信息 / **编号 1 人话汇报层** / 编号 2~9 专业明细层：总览 / 清单 / 分类 / 冲突与问题 / 评分 / 行动建议明细 / 历史对比 / 标准对照）
-2. **回填数据源（一律以各阶段写回版为准，禁止用 report 重算的静态版覆盖）**：
+2. **规模分级策略（§6.2.1，报告输出 JSON 的 `scale` 字段 + 元信息"规模档位"行标明当前档位）**：
+   - S1 精细（≤20）/ S2 标准（21~80）→ 完整报告（9 部分全量明细），主报告全部回填区回填
+   - S3 摘要（81~300）/ S4 极限（>300）→ `run.py report` 自动生成主报告（摘要模式）+ 各功能域附录
+     `skill_audit_appendix_<域>.md`（完整明细）。主报告第 1 部分汇报层全量回填；冲突/处方主报告只留
+     Top 20/Top 30，**完整明细在各附录中逐域回填**（"影响你什么"与"通俗评估"列必须填全，
+     健康度分布从附录评分汇总推导）；S4 档处方已批量聚合（详见 chunk-07"规模分级策略"节）
+   - **S3/S4 逐域回填批次规则**（与 04 批处理同一防线）：每功能域附录一批，批内只读该域的
+     conflicts/scores/rx 子集，正文预算 ≤10k token；每完成一域**回报 00-master 写入接力棒
+     `batch.appendix_done`**（断点续跑时从未完成域继续）；全部域完成后再回填主报告汇报层。
+     **被打回重做（gate3 BLOCK-E）时不受 appendix_done 限制，全量重填**（00-master 已清空该字段）
+   - **MED_DEBRIEF 断点续跑**：该阶段 ⬜ 但报告/附录已存在（回填了部分域）→ **禁止重跑 `run.py report`**
+     （会覆盖已回填内容），按接力棒 `batch.appendix_done` 从未回填域继续；仅当报告/附录文件缺失才重跑 report
+   - **附录 severity 一致性**：附录冲突表的 severity 已由 `run.py report` 从 `_medic_conflicts.json`
+     写回版读取（03 确认 + 05 补齐后的值，非静态初值）；07 回填时**只需核对附录与主报告第 5 部分
+     对同一冲突显示一致**，无需逐格覆盖
+3. **回填数据源（一律以各阶段写回版为准，禁止用 report 重算的静态版覆盖）**：
    - 第 3 部分清单 / 第 4 部分分类 → 读 `.medic/_medic_classify.json`（domain_final 版）+ `_medic_inventory.json`
    - 第 5 部分冲突 → 读 `.medic/_medic_conflicts.json`（03 确认版：severity + evidence + impact）
    - 第 6 部分评分 → 读 `.medic/_medic_scores.json`（各 Skill 条目的 `llm_scores` 键）
-   - 第 7 部分行动建议 → 读 `.medic/_medic_rx.json`（06 完善版）
+   - 第 7 部分行动建议 → 读 `.medic/_medic_rx.json`（06 完善版，含 `llm_actions` 精确操作数组）
    - 第 8 部分历史对比 → 读 `.medic/_medic_last_inventory.json`
+   - **IDE 补录项**：01 合并清单中"IDE 清单独有"的 Skill 磁盘不可见，report 各表不含它们——
+     在主报告第 3 部分**与所属功能域附录的清单/分类表**中手工补入并标注"IDE 清单独有"（数据源 = 01 传下的补录清单）
 3. **必须回填**（LLM 智能分析层）：
    - **第 1 部分汇报层（人话版）**：
      - 1.1 健康度总评：一句话总评 + 分布条（放心用 █ 7 ｜ 基本能用 █ 5 ｜ 不太成熟 █ 1 ｜ 不建议用 █ 1）
@@ -50,8 +67,8 @@
 1. 产出**完成摘要**（各阶段统计 + 报告路径）并输出给用户；**报告实际路径回报 00-master**（用于回填 `artifacts.report`）
 2. **接力棒收口与 cleanup 由 00-master 负责**（单点写：只有 00-master 更新接力棒）——
    07 完成 MED_CLOSE 产出后，00-master 验证通过即更新 `state=CLOSE, is_running=0` 并记录 history，
-   **收口完成后由 00-master 最后执行 `run.py cleanup`**（白名单清理 classify/conflicts/scores/rx/review；
-   **保留 `_medic_baton.json`、`_medic_inventory.json`、`_medic_last_inventory.json` 与历史报告**
-   ——断点续跑 / 增量模式 / 历史对比的基础）
+   **收口完成后由 00-master 最后执行 `run.py cleanup <root>`**（白名单清理 classify/conflicts/scores/rx/review；
+   **保留 `_medic_baton.json`、`_medic_inventory.json`、`_medic_last_inventory.json`、历史报告
+   与 S3/S4 档的附录文件 `skill_audit_appendix_*.md`** ——断点续跑 / 增量模式 / 历史对比的基础）
 3. **收口先于清理**：先落盘 `state=CLOSE` 再 cleanup，避免"cleanup 后收口前中断"触发产物回退误判整链重做
 4. **中断续跑前禁止 cleanup**：is_running=1 时中间产物必须保留，否则闸门验证会断

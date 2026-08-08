@@ -4,7 +4,7 @@
 
 ## 规则处方候选（prescribe 命令）
 
-`medic_tools/run.py prescribe` 基于**冲突矩阵 + 静态维护信号**生成规则处方候选（不依赖 LLM 评分）：
+`medic_tools/run.py prescribe <root> --save` 基于**冲突矩阵 + 静态维护信号**生成规则处方候选（不依赖 LLM 评分）：
 
 | 候选类型 | 触发 | 方向 |
 |----------|------|------|
@@ -21,6 +21,11 @@
 > （用 IDE Write 工具），禁止只留在对话里；05-auditor 与 07-reporter 以写回版为准。
 > **severity 数据源**：处方引用的冲突严重度/判定一律以 `_medic_conflicts.json` 写回版为准
 > （03 确认 + 05 补齐），禁止沿用 prescribe 静态候选的 `candidate` 初值。
+>
+> **S4 聚合处方（>300 活跃，prescribe 自动聚合）**：聚合后 `targets` 含多个 Skill，完善时必须
+> **对 targets 中每个 Skill 分别给出精确操作**，禁止只针对第一个目标；聚合只压缩条目数、不压缩覆盖范围。
+> 聚合规则枚举见 chunk-04 规模分级策略：maintain/fix-frontmatter/fix-or-archive/slim 同型合并、
+> add-antitrigger 按 Skill 聚合、merge/boundary/schedule 保持逐对。
 
 ## 处方生成规则（LLM 层）
 
@@ -37,7 +42,8 @@
 1. 每个处方必须含精确可执行指引：具体文件路径 + 改动内容 + 执行方式
 2. 本 Skill **只产出处方、不代执行**
 3. 处方清单进入回访队列：下次审计逐一核对执行情况；
-   **需后续落地的未完成处方（prescriptions_outstanding）回报 00-master**，由主控在 MED_CLOSE 收口时登记进接力棒
+   **需后续落地的未完成处方（prescriptions_outstanding）在 rx 条目上补 `outstanding: true` 字段并回报 00-master**，
+   由主控在 MED_CLOSE 收口时登记进接力棒 `history.prescriptions_outstanding`
 
 ## 审核与打回
 
