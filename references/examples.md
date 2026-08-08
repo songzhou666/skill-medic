@@ -29,7 +29,7 @@
 
 **命令**：`python run.py scan <project_root> --save`
 
-**输出片段**（每项关键字段）：
+**输出片段**（每项关键字段；`path` 为平台原生绝对路径，Windows 下为反斜杠，**命令行入参请用正斜杠**）：
 ```json
 {
   "name": "conspect",
@@ -100,7 +100,7 @@
       "type": "C2",
       "overlap_count": 6,
       "keywords": ["浏览器", "自动化"],
-      "severity": "high"
+      "severity": "medium"
     }
   ]
 }
@@ -145,7 +145,7 @@
 [
   {
     "type": "add-antitrigger",
-    "severity": "high",
+    "severity": "medium",
     "targets": ["agent-browser", "xbrowser"],
     "conflict": "C2",
     "rule": "意图抢占：为双方 description 补充'何时不要调用'反触发说明，降低误触发",
@@ -165,8 +165,8 @@
 **输出片段**：
 ```json
 {
-  "report_path": ".\\medic\\skill_audit_report_20260806_134509.md",
-  "inventory_path": ".\\medic\\_medic_inventory.json",
+  "report_path": "./.medic/skill_audit_report_20260806_134509.md",
+  "inventory_path": "./.medic/_medic_inventory.json",
   "skills_count": 11,
   "conflict_candidates": 39,
   "prescriptions": 45
@@ -179,7 +179,7 @@
 
 **场景**：与上次清单对比，输出新增/变更/删除的 Skill。
 
-**命令**：`python run.py diff <project_root> <last_inventory>`
+**命令**：`python run.py diff <project_root> [last_inventory]`（缺省用 `.medic/_medic_last_inventory.json`）
 
 **输出片段**：
 ```json

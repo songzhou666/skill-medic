@@ -27,14 +27,14 @@ python .trae/skills/skill-medic/medic_tools/run.py scan <project_root> --save
 # 分析单个 Skill（<skill_name> 换成实际 Skill 名）
 python .trae/skills/skill-medic/medic_tools/run.py analyze <project_root> <skill_name>
 
-# 静态冲突候选
-python .trae/skills/skill-medic/medic_tools/run.py conflict <project_root>
+# 静态冲突候选（--save 落盘中间产物到 .medic/）
+python .trae/skills/skill-medic/medic_tools/run.py conflict <project_root> --save
 
-# 八维评分静态证据信号（供 LLM 打分）
-python .trae/skills/skill-medic/medic_tools/run.py score <project_root> <skill_name>
+# 八维评分静态证据信号（供 LLM 打分；--save 累积落盘）
+python .trae/skills/skill-medic/medic_tools/run.py score <project_root> <skill_name> --save
 
-# 规则处方候选
-python .trae/skills/skill-medic/medic_tools/run.py prescribe <project_root>
+# 规则处方候选（--save 落盘中间产物到 .medic/）
+python .trae/skills/skill-medic/medic_tools/run.py prescribe <project_root> --save
 
 # 生成报告
 python .trae/skills/skill-medic/medic_tools/run.py report <project_root>
@@ -42,7 +42,7 @@ python .trae/skills/skill-medic/medic_tools/run.py report <project_root>
 
 ## 版本
 
-v0.4.9 — TRACE 自检补漏（examples.md / 渐进式披露第3层 / score 信号修复）；v0.4.8 真实反馈核查修复
+v0.4.16 — 六轮回归收敛（fix-frontmatter 边界 / 命名泛化 / description 优化）+ 端到端 12 项测试全过；v0.4.15 五轮实测收敛（报告第9部分定级阈值 / merge severity / BOM 兼容）；v0.4.14 四轮验收收敛（project_root 铁律 / 续跑 batch 恢复）
 
 ## 依赖
 

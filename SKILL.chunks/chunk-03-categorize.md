@@ -13,7 +13,7 @@
 
 ## 分类流程
 
-1. 读取 `_medic_inventory.json`（含 `run.py categorize` 产出的 `domain_hint` / `interaction` / `lifecycle`）
+1. 读取 `.medic/_medic_classify.json`（`run.py categorize --save` 产出，含静态初值 `domain_hint` / `interaction` / `lifecycle`）
 2. LLM 逐 Skill 语义判定功能域（`domain_final`），参考但不盲从 `domain_hint`：
    - `domain_hint` 有值且语义吻合 → 采纳，evidence 沿用 + 可补充
    - `domain_hint` 有值但语义不符 → 覆盖，必须记录"初值 → 修正值 + 理由"
@@ -46,7 +46,7 @@
 | 浏览器驱动型 | references/mcp-reference.md 存在，或 description 含 CDP/Playwright/browser_ 等精确词 |
 | 数据库驱动型 | description 含 MySQL/数据库/DB 连接/sqlite 等**通用技术词**（具体库名/表名是环境数据，不参与交互模型判定，由 C4 检测从代码通用提取） |
 | 网络API型 | description 含 Gitea/COS/WebSearch 等精确词 |
-| 脚本工具型 | 有 `*_tools/` 或 `tools/` 目录 |
+| 脚本工具型 | 有 `*_tools/` 或 `tools/` 目录，**或** description 含 run.py/CLI/命令行 等精确词 |
 | 纯提示词型 | 无工具目录且无上述命中 |
 | 混合型 | 同时具备多种模式（LLM 判定） |
 
@@ -56,11 +56,18 @@
 |------|----------|
 | 活跃维护 | 有 CHANGELOG 且近期有更新痕迹 |
 | 维护停滞 | 无更新痕迹 |
-| 开发中 | 仅有设计稿（_design.md / 设计需求文档.md） |
-| 备份归档 | 仅 zip 包 |
-| 已发布 | 全局同步可用 |
+| 开发中 | 仅有设计稿（_design.md / 设计需求文档.md），无 SKILL.md |
+| 备份归档 | 仅 zip 包（scan 层即跳过，不进入 classify） |
+| 已发布 | 全局同步可用（01 合并时从 available_skills 标注，静态 classify 不产出） |
+
+> **实现口径**：静态 `categorize` 对有 SKILL.md 的 active Skill 只产出"活跃维护（有 CHANGELOG，优先）/ 开发中（仅设计稿）/ 维护停滞"三类；
+> "备份归档"（仅 zip）在 scan 层跳过、"已发布"（全局同步）由 01-inventory 合并 available_skills 时人工标注。
 
 ## 输出格式
 
 每个 Skill 输出三维标签 + evidence，形如：
 `example-skill | 文档生成 · 纯提示词型 · 活跃维护 | evidence: description L1"生成操作手册"`
+
+**写回铁律**：LLM 判定并回填的 `domain_final` **必须覆盖写回 `.medic/_medic_classify.json`**
+（用 IDE Write 工具更新该 JSON 的 `domain_final` 字段），禁止只留在对话里；
+下游 04-scorer（分组）/ 03-conflict（分组）/ 06-synthesizer / 05-auditor 统一读写回版。

@@ -24,7 +24,7 @@ IDE 已经把当前所有 Skill 引导给 AI 了，顺着它走，而不是自�
 文件系统扫描（`run.py scan`）只用于**补充静态指标**（路径 / token / 结构标志），多编辑器兼容：
 
 1. workspace 候选目录（全部存在的都收集，按序优先）：`.trae/skills` → `.claude/skills` → `.cursor/skills` → `.codex/skills` → `skills`
-2. 全局候选目录（§9.1，探测不到**不阻断**）：`~/.trae-cn/skills`、`~/.claude/skills`、`~/.cursor/skills`、`~/.trae/skills`
+2. 全局候选目录（§9.1，探测不到**不阻断**）：`~/.trae-cn/skills`、`~/.claude/skills`、`~/.cursor/skills`、`~/.trae/skills`、`~/.qclaw/skills`
 3. 用户显式指定的附加目录
 4. **同名 Skill 去重**：workspace 优先，标注 `source` 与 `scope`（workspace / global）
 5. **同源裁决**：同名不同路径的 Skill，默认按 §9.1 去重只保留一个（workspace 优先）；
@@ -51,8 +51,9 @@ IDE 已经把当前所有 Skill 引导给 AI 了，顺着它走，而不是自�
 
 ### 异常 Skill 处理
 
-- SKILL.md 缺失 / frontmatter 解析失败 / 目录不可读 / 编码无法识别 → `status=broken`
-- 异常 Skill 不阻断全流程，跳过 MED_VITAL 评分，在报告中标注"未评分（异常）"
+- SKILL.md 缺失 / 编码无法识别 → `status=broken`（run.py 实现），跳过 MED_VITAL 评分，报告中标注"未评分（异常）"
+- 目录不可读（权限/IO 异常）→ 该目录**整目录跳过**并记录"该范围未覆盖（原因）"，不产生 broken 条目、不阻断
+- frontmatter 缺失/解析失败 → **仍为 `status=active`**（仅 `has_frontmatter=false`），由 prescribe 给出 fix-frontmatter 处方
 - 编码读取顺序：UTF-8 → GBK → 仍失败判定异常
 
 ### 输出
@@ -68,6 +69,7 @@ IDE 已经把当前所有 Skill 引导给 AI 了，顺着它走，而不是自�
   "version": "1.0.0",
   "chars": 2500,
   "tokens_est": 1500,
+  "always_load_tokens_est": 1560,
   "has_frontmatter": true,
   "has_changelog": true,
   "has_readme": true,
@@ -81,3 +83,5 @@ IDE 已经把当前所有 Skill 引导给 AI 了，顺着它走，而不是自�
 
 > **LLM 层合并**：01-inventory-agent 必须把 available_skills 清单（IDE 注入）与脚本扫描结果合并——
 > 脚本扫到的但 IDE 清单没有的，标"仅文件系统可见"；IDE 清单有的但脚本没扫到的，以 IDE 为准并补录。
+> **合并结果必须用 IDE Write 工具覆盖写回 `.medic/_medic_inventory.json`**（保留脚本产出的全部字段，追加 source/scope 标注），禁止只留在对话里。
+> **补录限制**：`run.py` 的 categorize/conflict/prescribe/report 均以磁盘扫描为准（重扫文件系统），IDE 补录项若磁盘不可见，下游命令不会自动带上——补录项由 07-reporter 在报告第 3 部分手工补入并标注"IDE 清单独有"。

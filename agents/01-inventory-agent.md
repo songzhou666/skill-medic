@@ -15,12 +15,16 @@
 4. zip 备份标注为"备份归档"
 
 ### MED_ROSTER（铁律：禁止读 SKILL.md 正文全文）
-1. 读取 frontmatter 字段（name / description / version / tags）
-2. 收集目录结构标志
-3. 调用 `medic_tools/run.py scan <root> --save`（CLI 约定见 references/cli-guide.md），落盘 `.medic/_medic_inventory.json`
-4. 编码异常 → 置 `status=broken`，跳过评分
-5. **合并 available_skills 与脚本扫描结果**：脚本扫到但清单没有 → 标"仅文件系统可见"；
+1. frontmatter 字段与目录结构标志统一由 `medic_tools/run.py scan <root> --save` 一次性产出
+   （CLI 约定见 references/cli-guide.md），落盘 `.medic/_medic_inventory.json`
+2. AI 只读该 JSON，**不直接读被检 Skill 文件**（避免绕 CLI、超上下文）
+3. 编码异常 → 置 `status=broken`，跳过评分
+4. **合并 available_skills 与脚本扫描结果**：脚本扫到但清单没有 → 标"仅文件系统可见"；
    清单有但脚本没扫到 → 以 IDE 为准补录
+5. **合并结果写回（铁律）**：合并后的全量清单**必须用 IDE Write 工具覆盖写回
+   `.medic/_medic_inventory.json`**（保留脚本产出的全部字段，追加 source/scope 标注），禁止只留在对话里
+6. **补录限制**：`run.py` 的 categorize/conflict/prescribe/report 均以磁盘扫描为准（重扫文件系统），
+   IDE 补录项若磁盘不可见，下游命令不会自动带上——补录项由 07-reporter 在报告第 3 部分手工补入并标注"IDE 清单独有"
 
 ### 分析深度边界（铁律）
 只做抽象层：识别类型、看关系、查体积、提取资源依赖**字段名/路径**。

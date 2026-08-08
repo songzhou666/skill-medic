@@ -17,6 +17,10 @@
 | fix-or-archive | broken Skill | 修复或归档 |
 
 > 规则层只给候选与方向；**精确执行指引（文件路径 + 改动内容 + 执行方式）与优先级由 LLM 完善**。
+> **写回铁律**：LLM 完善后的处方（含 7.2 改造建议分流）必须**覆盖写回 `.medic/_medic_rx.json`**
+> （用 IDE Write 工具），禁止只留在对话里；05-auditor 与 07-reporter 以写回版为准。
+> **severity 数据源**：处方引用的冲突严重度/判定一律以 `_medic_conflicts.json` 写回版为准
+> （03 确认 + 05 补齐），禁止沿用 prescribe 静态候选的 `candidate` 初值。
 
 ## 处方生成规则（LLM 层）
 
@@ -32,10 +36,11 @@
 
 1. 每个处方必须含精确可执行指引：具体文件路径 + 改动内容 + 执行方式
 2. 本 Skill **只产出处方、不代执行**
-3. 处方清单进入回访队列：下次审计逐一核对执行情况
+3. 处方清单进入回访队列：下次审计逐一核对执行情况；
+   **需后续落地的未完成处方（prescriptions_outstanding）回报 00-master**，由主控在 MED_CLOSE 收口时登记进接力棒
 
 ## 审核与打回
 
 - 处方与冲突矩阵不一致 → 打回 MED_RX 重出
 - 05-auditor-agent 审核处方合理性
-- 重试 ≥3 次 → `state=FAILED`
+- 重试 ≥3 次 → `state=FAILED`（is_running 保持 1，由下次调用按状态异常处理恢复，非死局）

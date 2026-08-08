@@ -1,8 +1,8 @@
 ---
 name: skill-medic
 display_name: SkillMedic — Skill 健康检查与冲突检测
-version: 0.4.9
-description: 检查你安装的所有 AI Skill（技能）：列出完整清单、发现内容重复或互相冲突的 Skill、评估每个 Skill 是否成熟可靠，并告诉你怎么处理（哪些可放心用、哪些建议合并或删除）。当用户问“我有哪些 skill / 哪些 skill 重复了 / skill 有没有问题 / 该留哪个 skill”时调用。当用户需要创建新 Skill、检查单个 Skill 质量、或纯知识问答时不要调用。
+version: 0.4.16
+description: 检查你安装的所有 AI Skill：列出完整清单、找出内容重复或互相冲突的 Skill、评估每个是否成熟可靠，并告诉你怎么处理（放心用/合并/删除）。当用户问"我有哪些 skill / 哪些重复了 / skill 有没有问题 / 该留哪个"时调用。创建新 Skill、单体质量自检、C 盘清理、代码审查或安全扫描、纯知识问答时不要调用。
 tags: [skill-engineering, audit, conflict-detection, scoring, inventory]
 language: zh-CN
 ---
@@ -71,6 +71,7 @@ MED_SCOPE → MED_ROSTER → MED_SORT → MED_CONFLICT → MED_VITAL → MED_RX 
 | MED_VITAL | 01, 05, 08 |
 | MED_RX | 01, 06 |
 | MED_DEBRIEF | 01, 07 |
+| MED_CLOSE | 01（复用 07-reporter-agent，无独立 chunk） |
 | 任意子 Agent 激活 | 01, 09（+ 对应阶段 chunk） |
 
 > 详细执行细则见各 Chunk 文件。本文件仅保留触发契约 + 路由总览，避免膨胀。
@@ -123,7 +124,7 @@ MED_SCOPE → MED_ROSTER → MED_SORT → MED_CONFLICT → MED_VITAL → MED_RX 
 
 ### ⚠️ 需要素材才能做
 
-1. **增量审计**：需要指定"与哪次清单对比"（默认用上次 `.medic/_medic_inventory.json`）
+1. **增量审计**：需要指定"与哪次清单对比"（默认用上次 `.medic/_medic_last_inventory.json`）
 2. **只检特定范围**：需要用户说明（如"只看 workspace"）
 3. **专项检查**：需要用户说明（如"只查冲突"或"只打分"）
 

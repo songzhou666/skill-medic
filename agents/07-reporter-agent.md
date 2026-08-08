@@ -6,8 +6,17 @@
 
 ## 执行规则
 
+0. **报告正文零场外话（铁律）**：报告是给用户看的成品。回填时把模板中的 HTML 注释（`<!-- ... -->`）替换为真实内容后**删除**，
+   补全空占位（1.1 分级名单 / 1.2 TOP 榜 / 1.3 / 白话导读 / 7.1 使用建议）；最终报告正文**不得残留**
+   "例：/LLM 回填/AI 回填/回填区"等任何模板指导语，也不得残留未替换的"（）"空占位。
 1. 汇总各阶段产物为完整报告（双层：元信息 / **编号 1 人话汇报层** / 编号 2~9 专业明细层：总览 / 清单 / 分类 / 冲突与问题 / 评分 / 行动建议明细 / 历史对比 / 标准对照）
-2. **必须回填**（LLM 智能分析层）：
+2. **回填数据源（一律以各阶段写回版为准，禁止用 report 重算的静态版覆盖）**：
+   - 第 3 部分清单 / 第 4 部分分类 → 读 `.medic/_medic_classify.json`（domain_final 版）+ `_medic_inventory.json`
+   - 第 5 部分冲突 → 读 `.medic/_medic_conflicts.json`（03 确认版：severity + evidence + impact）
+   - 第 6 部分评分 → 读 `.medic/_medic_scores.json`（各 Skill 条目的 `llm_scores` 键）
+   - 第 7 部分行动建议 → 读 `.medic/_medic_rx.json`（06 完善版）
+   - 第 8 部分历史对比 → 读 `.medic/_medic_last_inventory.json`
+3. **必须回填**（LLM 智能分析层）：
    - **第 1 部分汇报层（人话版）**：
      - 1.1 健康度总评：一句话总评 + 分布条（放心用 █ 7 ｜ 基本能用 █ 5 ｜ 不太成熟 █ 1 ｜ 不建议用 █ 1）
        + **分级名单（逐个点名）**：把每个 Skill 的名字归入四档（放心用 L3 / 基本能用 L2 / 不太成熟 L1 / 不建议用 L0），
@@ -38,8 +47,11 @@
 
 ## MED_CLOSE 阶段
 
-1. 更新接力棒（state=CLOSE, is_running=0），`history` 记录本次报告路径
-2. **仅当会话全部完成**时执行 `run.py cleanup`（清理本次会话中间产物 classify/conflicts/scores/rx；
-   **保留 `_medic_inventory.json` 与历史报告**——增量模式/历史对比的基础）
-3. **中断续跑前禁止 cleanup**：is_running=1 时中间产物必须保留，否则闸门验证会断
-4. 输出完成摘要给用户
+1. 产出**完成摘要**（各阶段统计 + 报告路径）并输出给用户；**报告实际路径回报 00-master**（用于回填 `artifacts.report`）
+2. **接力棒收口与 cleanup 由 00-master 负责**（单点写：只有 00-master 更新接力棒）——
+   07 完成 MED_CLOSE 产出后，00-master 验证通过即更新 `state=CLOSE, is_running=0` 并记录 history，
+   **收口完成后由 00-master 最后执行 `run.py cleanup`**（白名单清理 classify/conflicts/scores/rx/review；
+   **保留 `_medic_baton.json`、`_medic_inventory.json`、`_medic_last_inventory.json` 与历史报告**
+   ——断点续跑 / 增量模式 / 历史对比的基础）
+3. **收口先于清理**：先落盘 `state=CLOSE` 再 cleanup，避免"cleanup 后收口前中断"触发产物回退误判整链重做
+4. **中断续跑前禁止 cleanup**：is_running=1 时中间产物必须保留，否则闸门验证会断

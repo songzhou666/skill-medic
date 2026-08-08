@@ -4,9 +4,11 @@ medic_tools - SkillMedic 工具层 CLI
 用法:
     python run.py scan <project_root>                 # 列出所有 Skill 目录
     python run.py analyze <project_root> <skill>      # 静态指标分析（skill 支持路径或目录名）
-    python run.py conflict <project_root>             # 静态冲突候选
-    python run.py score <project_root> <skill>        # 静态指标输出（skill 支持路径或目录名）
-    python run.py diff <project_root> <last_inventory># 增量差异对比
+    python run.py categorize <project_root> [--save]  # 三维分类静态初值
+    python run.py conflict <project_root> [--save]   # 静态冲突候选
+    python run.py score <project_root> <skill> [--save]  # 静态指标输出（skill 支持路径或目录名）
+    python run.py prescribe <project_root> [--save]   # 规则处方候选
+    python run.py diff <project_root> [last_inventory]# 增量差异对比（缺省用 _medic_last_inventory.json）
     python run.py report <project_root>               # 生成报告（总是落盘 .medic/，无需 --save）
     python run.py ping <project_root>                 # 工具自检
     python run.py cleanup <project_root>              # 清理临时文件
@@ -21,6 +23,7 @@ medic_tools - SkillMedic 工具层 CLI
 import argparse
 import json
 import os
+import shutil
 import sys
 import math
 import re
@@ -69,10 +72,27 @@ C2_HIGH_OVERLAP = 10         # 意图抢占：高严重度交集数
 C3_TOKEN_THRESHOLD = 8000    # 上下文膨胀：常驻 token 阈值（且无 chunk 分层）
 C3_HIGH_TOKEN = 30000        # 上下文膨胀：高严重度阈值
 C4_INFRA_MIN_OWNERS = 4      # 依赖冲突：基础设施型共享（≥N Skill 引用则聚合单列，避免矩阵爆炸）
+C4_MTIME_DIFF_SEC = 86400 * 7  # 依赖冲突：双方实现 mtime 差异 >7 天 → 高严重度（一方改动未同步）
 
 # token 估算公式（§9.2，固定）
 TOKEN_CJK_DIV = 1.7
 TOKEN_ASCII_DIV = 4
+
+
+def _safe_listdir(path: str) -> list[str]:
+    """目录列举兜底：权限异常/竞态删除时不中断全量扫描，返回空列表"""
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
+
+def _safe_mtime(path: str):
+    """文件修改时间兜底：读取失败返回 None（diff 会回退字符数比较）"""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
 
 
 def is_tools_dir(name: str) -> bool:
@@ -138,15 +158,25 @@ def token_estimate(text: str) -> int:
     return math.ceil(cjk_chars / TOKEN_CJK_DIV + ascii_chars / TOKEN_ASCII_DIV)
 
 
+# 单个 SKILL.md 最大读取字节（§14 风险对策：单 Skill 文本量设上限，超限截断并提示）
+MAX_SKILL_MD_BYTES = 512 * 1024
+
+
 def read_file_safe(filepath: str) -> tuple[str | None, str | None]:
     """
-    安全读取文件，尝试 UTF-8 → GBK。
+    安全读取文件，尝试 UTF-8（含 BOM）→ GBK；超大文件截断。
     返回 (content, error_message)
     """
-    for encoding in ['utf-8', 'gbk']:
+    content = None
+    for encoding in ['utf-8-sig', 'gbk']:
         try:
             with open(filepath, 'r', encoding=encoding) as f:
-                return f.read(), None
+                raw = f.read(MAX_SKILL_MD_BYTES + 1)
+                if len(raw) > MAX_SKILL_MD_BYTES:
+                    content = raw[:MAX_SKILL_MD_BYTES] + "\n<!-- 内容超限，已截断 -->"
+                else:
+                    content = raw
+                return content, None
         except UnicodeDecodeError:
             continue
         except FileNotFoundError:
@@ -235,7 +265,12 @@ def scan_skills(project_root: str) -> list[dict]:
     inventory = []
     seen_names = set()
     for skills_dir, scope in dirs:
-        for item in sorted(os.listdir(skills_dir)):
+        try:
+            entries = sorted(os.listdir(skills_dir))
+        except (PermissionError, OSError) as e:
+            print(f"Warning: 无法读取目录 {skills_dir}：{e}（已跳过）")
+            continue
+        for item in entries:
             item_path = os.path.join(skills_dir, item)
             skill_md = os.path.join(item_path, "SKILL.md")
 
@@ -304,7 +339,7 @@ def scan_skills(project_root: str) -> list[dict]:
                 "has_chunks": os.path.isdir(os.path.join(item_path, "SKILL.chunks")),
                 "has_tools": any(
                     os.path.isdir(os.path.join(item_path, entry))
-                    for entry in os.listdir(item_path)
+                    for entry in _safe_listdir(item_path)
                     if is_tools_dir(entry)
                 ),
                 "has_protocols": os.path.isdir(os.path.join(item_path, "protocols")),
@@ -321,6 +356,13 @@ def scan_skills(project_root: str) -> list[dict]:
 
             # 估算 token
             tokens_est = token_estimate(content)
+            # 常驻加载量 = SKILL.md + load:always 的 chunk 索引（C3 上下文膨胀判定口径）
+            always_load_tokens = tokens_est
+            _ci_path = os.path.join(item_path, "SKILL.chunks", "chunk-index.yaml")
+            if os.path.isfile(_ci_path):
+                _ci_content, _ = read_file_safe(_ci_path)
+                if _ci_content:
+                    always_load_tokens = token_estimate(content + "\n" + _ci_content)
 
             inventory.append({
                 "name": item,
@@ -332,7 +374,9 @@ def scan_skills(project_root: str) -> list[dict]:
                 "tags": fm.get("tags", ""),
                 "chars": len(content),
                 "tokens_est": tokens_est,
+                "always_load_tokens_est": always_load_tokens,
                 "ref_files_count": ref_files_count,
+                "mtime": _safe_mtime(skill_md),
                 "has_frontmatter": fm["has_frontmatter"],
                 "frontmatter_completeness": fm["frontmatter_completeness"],
                 **dir_structure,
@@ -350,12 +394,8 @@ def analyze_skill(project_root: str, skill_name: str) -> dict:
     # 定位该 Skill：支持三种入参——绝对路径 / 相对路径 / 裸目录名（与 scan 输出的 path 兼容）
     skill_dir = None
     if os.path.isdir(skill_name):
-        # 绝对路径（如 scan 输出的完整 path）或已存在的相对路径
+        # 绝对路径（如 scan 输出的完整 path）或已存在的相对路径（含 skills/<skill> 形态）
         skill_dir = skill_name
-    elif os.sep in skill_name or "/" in skill_name:
-        # 形如 skills/xbrowser 的相对路径：相对当前工作目录再试一次
-        if os.path.isdir(skill_name):
-            skill_dir = skill_name
     if skill_dir is None:
         # 裸目录名：在全部候选目录中查找
         base = os.path.basename(skill_name.rstrip("/\\"))
@@ -369,7 +409,18 @@ def analyze_skill(project_root: str, skill_name: str) -> dict:
     skill_md = os.path.join(skill_dir, "SKILL.md")
 
     if not os.path.isfile(skill_md):
-        return {"name": skill_name, "error": "SKILL.md 不存在", "status": "broken"}
+        # 与 scan_skills 一致：SKILL.md 缺失时尝试从设计文档/README 提取 fallback 描述（参与 C1/C2 比对）
+        fallback_desc = ""
+        for doc_name in ["设计需求文档.md", "_design.md", "README.md"]:
+            doc_path = os.path.join(skill_dir, doc_name)
+            if os.path.isfile(doc_path):
+                fb, _ = read_file_safe(doc_path)
+                if fb:
+                    fallback_desc = fb[:1200]
+                    break
+        return {"name": skill_name, "status": "broken", "broken_reason": "SKILL.md 缺失",
+                "description": fallback_desc, "path": skill_dir,
+                "desc_source": "design_doc" if fallback_desc else None}
 
     content, error = read_file_safe(skill_md)
     if error:
@@ -402,13 +453,22 @@ def analyze_skill(project_root: str, skill_name: str) -> dict:
         if ci_content:
             always_load += "\n" + ci_content
 
+    has_tools = any(has_dir(os.path.join(skill_dir, e)) for e in _safe_listdir(skill_dir) if is_tools_dir(e))
     return {
         "name": skill_name,
+        "path": skill_dir,
         "status": "active",
         "chars": len(content),
         "tokens_est": token_estimate(content),
         "always_load_tokens_est": token_estimate(always_load),
+        "mtime": _safe_mtime(skill_md),
+        "description": fm.get("description", ""),
+        "version": fm.get("version", ""),
+        "tags": fm.get("tags", ""),
         "frontmatter": fm,
+        "has_frontmatter": fm["has_frontmatter"],
+        "frontmatter_completeness": fm["frontmatter_completeness"],
+        "has_tools": has_tools,
         "has_changelog": has_file(os.path.join(skill_dir, "CHANGELOG.md")),
         "has_readme": has_file(os.path.join(skill_dir, "README.md")),
         "has_agents": has_dir(os.path.join(skill_dir, "agents")),
@@ -489,9 +549,11 @@ def build_prescriptions(project_root: str, inventory: list[dict], conflicts: dic
     active_names = {s["name"] for s in inventory if s.get("status") == "active"}
 
     # C1 同质冲突：保留评分高者合并评分低者（谁高谁低需 LLM 按八维评分定夺）
+    # severity 继承候选初值（candidate=待确认），避免与第 5 部分冲突矩阵自相矛盾；
+    # C1 高/中定级由 05-auditor 在闸门① 依据 scores.json 补齐，06 以 conflicts.json 写回版为准
     for c in conflicts.get("C1", []):
         rx.append({
-            "type": "merge", "severity": "high",
+            "type": "merge", "severity": c.get("severity", "candidate"),
             "targets": [c["skill_a"], c["skill_b"]],
             "conflict": "C1",
             "rule": "同质冲突：保留八维评分较高者，合并/归档较低者",
@@ -521,7 +583,7 @@ def build_prescriptions(project_root: str, inventory: list[dict], conflicts: dic
     # C4 具体依赖冲突对（非基础设施）：划清职责或隔离
     for c in conflicts.get("C4", []):
         rx.append({
-            "type": "boundary", "severity": "medium",
+            "type": "boundary", "severity": c.get("severity", "medium"),
             "targets": [c["skill_a"], c["skill_b"]],
             "conflict": "C4",
             "resource": c.get("resource"),
@@ -545,11 +607,11 @@ def build_prescriptions(project_root: str, inventory: list[dict], conflicts: dic
         if s.get("status") != "active":
             continue
         name = s["name"]
-        if not s.get("has_frontmatter"):
+        if not s.get("has_frontmatter") or s.get("frontmatter_completeness", 1) < 1:
             rx.append({
                 "type": "fix-frontmatter", "severity": "medium",
                 "targets": [name], "conflict": None,
-                "rule": "frontmatter 缺失：补全 name/description/version/tags，description 需含'何时调用+何时不要调用'",
+                "rule": "frontmatter 缺失或字段不全：补全 name/description/version/tags，description 需含'何时调用+何时不要调用'",
                 "llm_todo": "给出补全后的 frontmatter 草案"
             })
         elif not (s.get("has_changelog") or s.get("has_readme")):
@@ -610,44 +672,45 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
     L.append("- **严重度**：待确认 = 机器初判\"疑似\"，由 AI 复核后定级")
     L.append("- **对号入座**：你只是**用 Skill 干活** → 看第 1 部分和第 7.1 使用建议；你自己**写/维护 Skill** → 看第 7.2 改造建议\n")
 
-    # 1 给你的结论（人话版汇报层；LLM 回填，必写）
-    L.append("## 1. 给你的结论（人话版，LLM 回填）\n")
-    L.append("> 这一节用大白话告诉你要紧的结果；专业数据与证据在第 2~9 部分完整保留，"
-             "需要深究可往下看。汇报层**必须**从第 5 部分冲突矩阵、第 6 部分评分表推导，"
-             "禁止另写一套分布（05-auditor BLOCK-E 核对）。\n")
+    # 1 给你的结论（人话版汇报层；AI 回填）
+    # 铁律：AI 回填后必须删除全部 HTML 注释与占位，报告正文不得残留任何模板指导语（例：/LLM 回填/AI 回填/回填区）
+    L.append("## 1. 给你的结论\n")
+    L.append("<!-- AI 回填：用一两句大白话总结——装了几个 Skill / 几个放心用 / 几个要注意 / 几个不建议用；发现了什么大问题。"
+             "汇报层必须从第 5 部分冲突矩阵、第 6 部分评分表推导，禁止另写一套分布。回填后删除本注释。 -->\n")
     L.append("### 1.1 健康度总评\n")
-    L.append("- 例：你装了 20 个 Skill，整体情况不错：7 个可以放心用，12 个基本能用但要注意，1 个不建议用。")
-    L.append("- 分布条（LLM 绘制，与第 6 部分一致）："
-             "放心用 ████████ 7 ｜ 基本能用 █████ 5 ｜ 不太成熟 █ 1 ｜ 不建议用 █ 1")
-    L.append("- 分级名单（LLM 回填，**逐个点名**，谁好谁不好一眼看到底；必须与第 6 部分评分表逐项一致）：")
-    L.append("  - 放心用（L3）：（LLM 列出名字，没有就写'无'）")
-    L.append("  - 基本能用（L2）：（LLM 列出名字，没有就写'无'）")
-    L.append("  - 不太成熟（L1）：（LLM 列出名字，没有就写'无'）")
-    L.append("  - 不建议用（L0）：（LLM 列出名字，没有就写'无'）")
+    L.append("<!-- AI 回填：① 总评一句话（如\"你装了 11 个 Skill，整体不错：3 个放心用、7 个基本能用、1 个不太成熟\"）；"
+             "② 分级名单逐个点名，与第 6 部分评分表逐项一致，没有的档写\"无\"。回填后删除本注释。 -->")
+    L.append("- 健康度分布：放心用（L3）｜基本能用（L2）｜不太成熟（L1）｜不建议用（L0）")
+    L.append("- 分级名单：")
+    L.append("  - 放心用（L3）：")
+    L.append("  - 基本能用（L2）：")
+    L.append("  - 不太成熟（L1）：")
+    L.append("  - 不建议用（L0）：")
     names = sorted((s["name"] for s in active), key=str.lower)
-    names_str = "、".join(names[:15]) + ("…等共" + str(len(active)) + " 个" if len(names) > 15 else "")
+    names_str = ("、".join(names[:15]) + ("…等共" + str(len(active)) + " 个" if len(names) > 15 else "")) if names else "无"
     L.append(f"- 本次检查范围：{len(active)} 个 Skill（{names_str}）\n")
     L.append("### 1.2 最需要注意的问题（TOP 榜，3~5 条）\n")
-    L.append("| # | 问题（一句话） | 影响你什么 | 建议怎么办 |")
-    L.append("|---|---------------|-----------|-----------|")
-    L.append("| 1 | 例：有 2 个 Skill 功能重复 | 例：你不知道该用哪个，AI 也可能随机选一个 | 例：以后都用 A，B 先别用 |\n")
-    L.append("### 1.3 你现在最该做的 2~3 件事（如果你是**使用者**）\n")
-    L.append("- 例：1) 别用 XX 处理正式数据（有风险） 2) 要生成手册时用 A 而不是 B，避免结果不稳定 3) 3 个不太成熟的 Skill 先别用于重要任务\n")
-    L.append("- 提示：如果你是 Skill 的**创建者 / 维护者**，想改文件根治问题的建议见第 7.2 节。\n")
+    L.append("<!-- AI 回填：列 3~5 条最要紧的问题，每条 = 问题一句话 / 影响你什么（日常语言）/ 建议怎么办（使用层面）。回填后删除本注释。 -->")
+    L.append("| # | 问题 | 影响你什么 | 建议怎么办 |")
+    L.append("|---|------|-----------|-----------|\n")
+    L.append("### 1.3 你现在最该做的 2~3 件事（如果你是使用者）\n")
+    L.append("<!-- AI 回填：从 7.1 使用建议挑 2~3 条最优先的（不用改文件就能照做的）。回填后删除本注释。 -->")
+    L.append("- 1) \n- 2) \n- 3) \n")
 
     # 2 总览
     L.append("## 2. 总览\n")
-    tokens = [s.get("tokens_est", 0) or 0 for s in active]
+    # 常驻口径（SKILL.md + load:always chunk 索引）与 C3 判定一致；旧清单无该字段回退单体 tokens_est
+    tokens = [s.get("always_load_tokens_est") or s.get("tokens_est", 0) or 0 for s in active]
     avg_tok = sum(tokens) / len(tokens) if tokens else 0
     domain_count = {}
     for c in classify:
-        d = c.get("domain_hint") or "待 LLM 判定"
+        d = c.get("domain_hint") or "未归类"
         domain_count[d] = domain_count.get(d, 0) + 1
     L.append(f"- Skill 总数：{len(inventory)}（活跃 {len(active)} / 异常 {len(broken)}）")
     L.append(f"- 常驻估算 token：平均 {avg_tok:.0f} / 最大 {max(tokens) if tokens else 0}")
     L.append("- 功能域分布（静态提示）：" + "；".join(f"{k}×{v}" for k, v in sorted(domain_count.items(), key=lambda x: -x[1])))
-    L.append("- 健康度分布条（LLM 回填，必须与第 1.1 节和第 6 部分一致）："
-             "放心用 █ N ｜ 基本能用 █ M ｜ 不太成熟 █ K ｜ 不建议用 █ J\n")
+    L.append("<!-- AI 回填：健康度分布条，与第 1.1 节和第 6 部分一致。回填后删除本注释。 -->")
+    L.append("- 健康度分布：放心用（L3）｜基本能用（L2）｜不太成熟（L1）｜不建议用（L0）\n")
 
     # 3 清单表
     L.append("## 3. 清单表\n")
@@ -663,18 +726,18 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
     L.append("")
 
     # 4 分类表
-    L.append("## 4. 分类表（静态提示；最终分类由 LLM 语义判定后回填）\n")
+    L.append("## 4. 分类表\n")
     L.append("| Skill | 用途分组 | 交互方式 | 维护状态 |")
     L.append("|-------|-----------|---------|---------|")
     c_map = {c["name"]: c for c in classify}
     for s in sorted(inventory, key=lambda x: x["name"]):
         c = c_map.get(s["name"], {})
-        L.append(f"| {s['name']} | {c.get('domain_hint') or '待判定'} | {c.get('interaction') or '-'} | {c.get('lifecycle') or '-'} |")
+        L.append(f"| {s['name']} | {c.get('domain_hint') or '未归类'} | {c.get('interaction') or '-'} | {c.get('lifecycle') or '-'} |")
     L.append("")
 
-    # 5 冲突与问题（专业明细：静态候选；影响由 LLM 回填）
-    L.append("## 5. 冲突与问题（专业明细：静态候选；'影响你什么'由 LLM 用日常语言回填）\n")
-    L.append("> 白话导读（LLM 回填）：你这里有 N 组 Skill 会互相干扰/重复，最需要注意的是 X×Y（原因一句话）。\n")
+    # 5 冲突与问题（专业明细：静态候选；影响由 AI 复核）
+    L.append("## 5. 冲突与问题\n")
+    L.append("<!-- AI 回填：白话导读——用一句话说清\"N 组真冲突，最需要注意的是 X×Y（原因一句话）\"；模板词伪冲突不计入。回填后删除本注释。 -->\n")
     conflict_type_plain = {
         "C1": "功能重复（C1）", "C2": "抢着响应（C2）", "C3": "占资源（C3）",
         "C4": "共享依赖（C4）", "C5": "抢工具（C5）",
@@ -683,8 +746,8 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
     conflict_rows = (conflicts.get("C1", []) + conflicts.get("C2", []) +
                      conflicts.get("C4", []) + conflicts.get("C5", []))
     if conflict_rows:
-        L.append("| A × B | 冲突类型 | 冲突点/资源 | 初判严重度 | 影响你什么（回填） |")
-        L.append("|-------|---------|------------|-----------|-------------------|")
+        L.append("| A × B | 冲突类型 | 冲突点/资源 | 初判严重度 | 影响你什么 |")
+        L.append("|-------|---------|------------|-----------|-----------|")
         for c in conflict_rows:
             a, b = c.get("skill_a", c.get("skill", "")), c.get("skill_b", "")
             res = c.get("resource") or c.get("keywords") or c.get("jaccard") or ""
@@ -693,10 +756,10 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
             t = conflict_type_plain.get(c.get("type"), c.get("type"))
             sev = severity_plain.get(c.get("severity"), c.get("severity", "待确认"))
             L.append(f"| {a} × {b} | {t} | {res} | {sev} | |")
-        L.append("\n> 说明：'冲突点/资源'含机器比对信息（专业参考），AI 复核后会在'影响你什么'列补充人话解读。\n")
-        L.append("\n> 影响示例（LLM 参考）：抢着响应 → \"当你说'帮我扫描页面'时，2 个 Skill 都会响应，AI 可能随机选一个 → 结果不稳定\"；"
-                 "功能重复 → \"两个 Skill 做同一件事，你不知道用哪个，建议只留一个\";"
-                 "同一 Skill 出现在两个 IDE 目录 → \"是分别安装过，建议只保留一份\"。\n")
+        L.append("\n> 说明：'冲突点/资源'含机器比对信息（专业参考），'影响你什么'列由 AI 复核后用日常语言补充。\n")
+        L.append("<!-- AI 回填参考示例（供复核时对照，不写入报告）：抢着响应 → \"当你说'帮我扫描页面'时，2 个 Skill 都会响应，AI 可能随机选一个 → 结果不稳定\"；"
+                 "功能重复 → \"两个 Skill 做同一件事，你不知道用哪个，建议只留一个\"；"
+                 "同一 Skill 出现在两个 IDE 目录 → \"是分别安装过，建议只保留一份\"。 -->\n")
     else:
         L.append("- 无冲突候选")
     for c in conflicts.get("C3", []):
@@ -713,11 +776,11 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
             L.append(f"- {s['name']}：{s.get('source', '-')}（已保留）+ {others}（重复）")
     L.append("")
 
-    # 6 评分明细（静态信号摘要；打分与通俗评估由 LLM 回填）
-    L.append("## 6. 评分明细（机器信号；AI 打分与通俗评估回填）\n")
+    # 6 评分明细（静态信号摘要；打分与通俗评估由 AI 复核）
+    L.append("## 6. 评分明细\n")
     L.append("> 数字 = 该维度机器统计的证据数（越多说明这个 Skill 该维度写得越充分，专业参考用）；"
              "想快速知道结果，看最后一列\"通俗评估\"即可。\"内容价值\"维度由 AI 语义评判，不在表中。\n")
-    L.append("| Skill | 触发说明 | 流程步骤 | 异常处理 | 产出检查 | 边界约束 | 工程配套 | 维护痕迹 | 通俗评估（回填） |")
+    L.append("| Skill | 触发说明 | 流程步骤 | 异常处理 | 产出检查 | 边界约束 | 工程配套 | 维护痕迹 | 通俗评估 |")
     L.append("|-------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|-----------------|")
     for s in sorted(active, key=lambda x: x["name"]):
         sig = static_score_signals(s)
@@ -726,16 +789,13 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
                  f"{len(sig['dim5_boundary']['hits'])} | "
                  f"{sum(1 for v in sig['dim7_engineering'].values() if v)}/4 | "
                  f"{sum(1 for v in sig['dim8_maintain'].values() if v)}/3 | |")
-    L.append("\n> 回填区：AI 对照八维细则给出每维分数/证据/扣分定位与定级，"
-             "定级用通俗格式如\"放心用（L3）\"（映射：L3 放心用 / L2 基本能用 / L1 不太成熟 / L0 不建议用）\n")
+    L.append("<!-- AI 回填：对照八维细则给出每维分数/证据/扣分定位与定级，定级用通俗格式如\"放心用（L3）\"（映射：L3 放心用 / L2 基本能用 / L1 不太成熟 / L0 不建议用）。回填后删除本注释。 -->\n")
 
     # 7 行动建议（分两层：7.1 使用建议=使用者直接照做；7.2 改造建议=创建者改 Skill 文件，可选）
     L.append("## 7. 行动建议\n")
-    L.append("### 7.1 使用建议（LLM 回填）—— 如果你是 Skill 的**使用者**，看这里\n")
+    L.append("### 7.1 使用建议（如果你是 Skill 的使用者，看这里）\n")
     L.append("> 不需要改任何文件，照着做就行。覆盖三类：**注意什么 / 有什么风险 / 什么需求别指望它**。\n")
-    L.append("- （LLM 回填。例：1) \"reqplan-v3 别用于真实项目排期，它更适合演示\" "
-             "2) \"要生成手册时用 A 而不是 B，避免两个 Skill 抢着响应导致结果不稳定\" "
-             "3) \"游戏文档那个 Skill 只支持英文，中文项目达不到你要的效果\"）\n")
+    L.append("<!-- AI 回填：按优先级列使用建议（如\"XX 别用于正式数据（有风险）\"；\"要生成手册时用 A 而不是 B，避免两个 Skill 抢着响应\"）。回填后删除本注释。 -->\n")
     L.append("### 7.2 改造建议 —— 如果你是 Skill 的**创建者 / 维护者**，看这里\n")
     L.append("> 以下建议需要改动 Skill 文件（合并/删文档/补说明/瘦身）。**使用者可以完全跳过本节**："
              "某个 Skill 影响使用，按 7.1 使用建议规避即可；你是作者想根治，再动手改。\n")
@@ -754,14 +814,14 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
             t = rx_type_plain.get(r['type'], r['type'])
             sev = rx_sev_plain.get(r.get("severity"), r.get("severity") or "-")
             L.append(f"| {sev} | {t} | {', '.join(r['targets'])} | {r['rule']} |")
-        L.append("\n> 回填区：AI 按优先级输出\"现在建议你做什么\"（先处理\"高\"），并为每条补精确操作（文件路径 + 改动内容 + 执行方式）；\"是否执行\"由用户/作者决定。\n")
+        L.append("<!-- AI 回填：在 7.2 表格基础上输出\"现在建议你做什么\"（先处理\"高\"优先级），并为每条补精确操作（文件路径 + 改动内容 + 执行方式）；\"是否执行\"由用户/作者决定。回填后删除本注释。 -->\n")
     else:
         L.append("- 无改造建议候选")
     L.append("")
 
     # 8 历史对比
-    L.append("## 8. 历史对比（存在上次审计时输出）\n")
-    last_inv = os.path.join(medic_dir(project_root), "_medic_inventory.json")
+    L.append("## 8. 历史对比\n")
+    last_inv = os.path.join(medic_dir(project_root), "_medic_last_inventory.json")
     if os.path.isfile(last_inv):
         try:
             with open(last_inv, 'r', encoding='utf-8') as f:
@@ -770,7 +830,7 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
             prev = {s["name"] for s in last if isinstance(s, dict)}
             L.append(f"- 新增 Skill：{sorted(cur - prev) if cur - prev else '无'}")
             L.append(f"- 消失 Skill：{sorted(prev - cur) if prev - cur else '无'}")
-            L.append("- 上次的问题解决了吗（成熟度变化 / 上期建议执行核对）：由 LLM 读取上次报告对比后补充")
+            L.append("<!-- 历史洞察：上次的问题解决了吗？覆盖三要素——① 成熟度变化（升级/降级/新增/修复）② 冲突新增与缓解（上期冲突是否仍在/新增哪些）③ 上期处方执行核对（prescriptions_outstanding 落地情况）。回填后删除本注释，无对应内容写'无'。 -->")
         except Exception as e:
             L.append(f"- 读取上次清单失败：{e}")
     else:
@@ -780,12 +840,11 @@ def build_report(project_root: str, inventory: list[dict], classify: list[dict],
     # 9 标准对照
     L.append("## 9. 标准对照表\n")
     L.append("- 当前 rubric：8-axis-v0.1（内置基线，2026-08-04）")
+    L.append("- 定级规则（固定阈值，引用 chunk-05，禁止自创）：L3≥80 ｜ L2 55~79 ｜ L1 30~54 ｜ L0<30")
     L.append("- 联网更新：未触发（用户未要求 / 版本未过期 / 非首次执行）。触发条件见 chunk-08")
 
     L.append("\n---\n")
-    L.append("*报告由 SkillMedic 生成。标有「LLM 回填 / 例：」的区块是 AI 完善区：第 1 部分结论、第 5 部分冲突影响、"
-             "第 6 部分评分定级、第 7.1 使用建议，需通过完整检查流程（MED_DEBRIEF）由 AI 回填后才算完成；"
-             "若你只运行了 CLI，看到占位属正常现象。*")
+    L.append("*本报告由 SkillMedic 自动生成；结论、评分定级与行动建议由 AI 结合完整检查流程输出。*")
     return "\n".join(L)
 
 
@@ -854,7 +913,7 @@ def collect_skill_text(skill_dir: str, max_chars: int = 200_000) -> str:
     # 注意：跳过 medic_tools 自身——检测器代码天然包含所有关键字（playwright/CDP/aitest），
     # 读入会造成自引用误报（如本 Skill 的 run.py）
     if os.path.isdir(skill_dir):
-        for entry in sorted(os.listdir(skill_dir)):
+        for entry in sorted(_safe_listdir(skill_dir)):
             if not is_tools_dir(entry) or entry == "medic_tools":
                 continue
             tp = os.path.join(skill_dir, entry)
@@ -866,8 +925,8 @@ def collect_skill_text(skill_dir: str, max_chars: int = 200_000) -> str:
                     try:
                         with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
                             chunks_text.append("\n".join(fh.readlines()[:300]))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"Warning: 读取 {fp} 失败（跳过该工具文件）: {e}")
 
     text = "\n".join(chunks_text)
     return text[:max_chars]
@@ -955,7 +1014,7 @@ def classify_skill(skill: dict, project_root: str) -> dict:
     has_mcp_ref = os.path.isfile(mcp_ref)
     has_tools_dir = any(
         os.path.isdir(os.path.join(skill_dir, entry))
-        for entry in os.listdir(skill_dir)
+        for entry in _safe_listdir(skill_dir)
         if is_tools_dir(entry)
     )
 
@@ -971,12 +1030,15 @@ def classify_skill(skill: dict, project_root: str) -> dict:
     if interaction == "纯提示词型" and has_tools_dir:
         interaction = "脚本工具型"
 
-    # 生命周期状态：开发中 > 活跃维护 > 维护停滞
-    if os.path.isfile(os.path.join(skill_dir, "_design.md")) or \
+    # 生命周期状态（chunk-03 五类；active 有 SKILL.md 才进入 classify）：
+    # 有 CHANGELOG = 活跃维护（版本迭代痕迹，优先于"仅有设计稿"的"开发中"）；
+    # 仅设计稿 = 开发中；两者皆无 = 维护停滞；
+    # "备份归档"（仅 zip）在 scan 层即跳过、"已发布"（全局同步）由 01 合并时从 available_skills 标注，静态 classify 不产出
+    if skill.get("has_changelog"):
+        lifecycle = "活跃维护"
+    elif os.path.isfile(os.path.join(skill_dir, "_design.md")) or \
             os.path.isfile(os.path.join(skill_dir, "设计需求文档.md")):
         lifecycle = "开发中"
-    elif skill.get("has_changelog"):
-        lifecycle = "活跃维护"
     else:
         lifecycle = "维护停滞"
 
@@ -1102,9 +1164,10 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
                         "severity": severity
                     })
 
-    # --- C3: 上下文膨胀（常驻 token 超阈值且无 chunk 分层）---
+    # --- C3: 上下文膨胀（常驻加载量超阈值且无 chunk 分层）---
+    # 常驻口径 = SKILL.md + load:always 的 chunk 索引（always_load_tokens_est），无该字段回退单体 tokens_est
     for skill in active:
-        tokens = skill.get("tokens_est", 0) or 0
+        tokens = skill.get("always_load_tokens_est") or skill.get("tokens_est", 0) or 0
         if tokens > C3_TOKEN_THRESHOLD and not skill.get("has_chunks"):
             candidates["C3"].append({
                 "skill": skill["name"], "type": "C3",
@@ -1113,9 +1176,11 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
             })
 
     # --- C4: 共享引用路径 / DB / 环境变量 / baton（资源名 -> 引用它的 Skill 集合）---
+    # 全文收集缓存：C4/C5 共用，避免每个 Skill 重复读取实现文本
+    text_cache = {}
     resource_owners = {}
     for skill in active:
-        text = collect_skill_text(skill.get("path") or "")
+        text = text_cache.setdefault(skill["name"], collect_skill_text(skill.get("path") or ""))
         # baton 文件：行级排除否定语境（"不用/不与…冲突/改用"等）
         for line in text.split('\n'):
             if re.search(r'[\w/\\-]*_?baton[\w-]*\.json', line) and \
@@ -1148,6 +1213,9 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
         if HARNESS_DIR_REL.replace("\\", "/") in text.replace("\\", "/"):
             resource_owners.setdefault(f"dir:{HARNESS_DIR_REL}", set()).add(skill["name"])
 
+    # skill 名 -> mtime（C4 严重度"mtime 差异 → 高"判定用）
+    _skill_mtime = {s.get("name"): s.get("mtime") for s in active}
+
     infra_shared = []
     for resource, owners in resource_owners.items():
         owners = sorted(owners)
@@ -1163,9 +1231,15 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
             continue
         for i in range(len(owners)):
             for j in range(i + 1, len(owners)):
+                # 共享资源且双方实现 mtime 差异明显 → 高严重度（一方改动未同步，可能静默破坏另一方）
+                _mt_a = _skill_mtime.get(owners[i])
+                _mt_b = _skill_mtime.get(owners[j])
+                _high = (_mt_a is not None and _mt_b is not None
+                         and abs(_mt_a - _mt_b) > C4_MTIME_DIFF_SEC)
                 candidates["C4"].append({
                     "skill_a": owners[i], "skill_b": owners[j], "type": "C4",
-                    "resource": resource, "severity": "medium"
+                    "resource": resource,
+                    "severity": "high" if _high else "medium"
                 })
     candidates["C4_infra"] = infra_shared
 
@@ -1173,7 +1247,7 @@ def build_conflict_candidates(project_root: str, inventory: list[dict]) -> dict:
     # 工具名/协议名是通用技术信号（playwright/COS/CDP），非环境数据，保留精确匹配
     tool_owners = {}
     for skill in active:
-        text = collect_skill_text(skill.get("path") or "")
+        text = text_cache.setdefault(skill["name"], collect_skill_text(skill.get("path") or ""))
         if re.search(r'mcp_playwright|browser_(?:navigate|click|snapshot|type|evaluate)', text):
             tool_owners.setdefault("mcp:playwright", set()).add(skill["name"])
         if re.search(r'mcp_TencentCloudCOS|putObject|getObject', text):
@@ -1280,7 +1354,7 @@ def main():
             print("Error: 需要指定 Skill 名称")
             sys.exit(1)
         skill_name = args.params[0]
-        # 兼容路径入参：传 skills/xbrowser 或完整 path 时取 basename 匹配（与 scan 输出对齐）
+        # 兼容路径入参：传 skills/<skill> 或完整 path 时取 basename 匹配（与 scan 输出对齐）
         base = os.path.basename(skill_name.rstrip("/\\"))
         inventory = scan_skills(project_root)
         skill = next((s for s in inventory if s["name"] == base), None)
@@ -1296,10 +1370,22 @@ def main():
             if os.path.isfile(path):
                 try:
                     with open(path, 'r', encoding='utf-8') as f:
-                        scores = json.load(f)
+                        loaded = json.load(f)
+                    # 只接受 dict 结构（{skill: signals}）；list/其他结构视为损坏
+                    if isinstance(loaded, dict):
+                        scores = loaded
+                    else:
+                        raise ValueError("scores 文件结构非法（应为 dict）")
                 except Exception:
+                    # 损坏备份后重建，避免静默清空已累积的其他 Skill 分数
+                    _bak = path + ".corrupt_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                    try:
+                        os.replace(path, _bak)
+                    except OSError:
+                        pass
+                    print(f"Warning: {path} 读取失败，已备份为 {_bak} 并重建")
                     scores = {}
-            scores[skill_name] = signals
+            scores[base] = {**scores.get(base, {}), **signals}  # 保留既有键（含 LLM 追加的 llm_scores），不整条覆盖
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(scores, f, ensure_ascii=False, indent=2)
             print(json.dumps({"saved": path, "skills": list(scores.keys())}, ensure_ascii=False))
@@ -1320,17 +1406,20 @@ def main():
         return
 
     if args.action == "diff":
-        """增量差异对比：对比上次清单"""
-        if not args.params:
-            print("Error: 需要指定上次清单文件路径")
-            sys.exit(1)
-        last_inventory_path = args.params[0]
+        """增量差异对比：对比上次清单（缺省用 .medic/_medic_last_inventory.json）"""
+        if args.params:
+            last_inventory_path = args.params[0]
+        else:
+            last_inventory_path = os.path.join(medic_dir(project_root), "_medic_last_inventory.json")
         current = scan_skills(project_root)
         try:
             with open(last_inventory_path, 'r', encoding='utf-8') as f:
                 last = json.load(f)
+        except FileNotFoundError:
+            print(json.dumps({"error": f"未找到上次清单：{last_inventory_path}（首次审计或清单被清理）"}, ensure_ascii=False))
+            return
         except Exception as e:
-            print(json.dumps({"error": f"读取上次清单失败: {e}"}))
+            print(json.dumps({"error": f"读取上次清单失败: {e}"}, ensure_ascii=False))
             return
 
         last_names = {s["name"] for s in last if isinstance(s, dict)}
@@ -1341,17 +1430,37 @@ def main():
             "removed": list(last_names - current_names),
             "changed": [],
         }
-        # 检查 mtime 变化
+        # 变更检测：比较 SKILL.md 修改时间（mtime）；旧清单无 mtime 字段时回退比较字符数
         for s in current:
             if s.get("name") in last_names:
                 last_skill = next((x for x in last if x.get("name") == s["name"]), None)
-                if last_skill and s.get("tokens_est") != last_skill.get("tokens_est"):
+                if not last_skill:
+                    continue
+                cur_mtime = s.get("mtime")
+                last_mtime = last_skill.get("mtime")
+                # 状态变化（active↔broken）或 mtime 变化均视为变更；
+                # 任一侧 mtime 缺失（当前读取失败或旧清单无该字段）→ 回退比较字符数
+                changed = (s.get("status") != last_skill.get("status"))
+                if not changed and cur_mtime is not None and last_mtime is not None:
+                    changed = (cur_mtime != last_mtime)
+                if not changed and (last_mtime is None or cur_mtime is None):
+                    changed = s.get("chars") != last_skill.get("chars")
+                if changed:
                     diff["changed"].append(s["name"])
         print(json.dumps(diff, ensure_ascii=False, indent=2))
         return
 
     if args.action == "report":
         """装配并落盘 Skill 检查报告（静态部分），同时落盘本次清单供增量/历史对比"""
+        # 归档"上次"清单：把现有 _medic_inventory.json 复制为 _medic_last_inventory.json
+        # （历史对比与增量 diff 的单一数据源；本次清单随后覆盖 _medic_inventory.json）
+        _inv_now = os.path.join(medic_dir(project_root), "_medic_inventory.json")
+        _inv_last = os.path.join(medic_dir(project_root), "_medic_last_inventory.json")
+        if os.path.isfile(_inv_now):
+            try:
+                shutil.copyfile(_inv_now, _inv_last)
+            except OSError as e:
+                print(f"Warning: 归档上次清单失败（历史对比可能缺失或陈旧）: {e}")
         inventory = scan_skills(project_root)
         classify = [classify_skill(s, project_root)
                     for s in inventory if s.get("status") == "active"]
@@ -1360,7 +1469,7 @@ def main():
         content = build_report(project_root, inventory, classify, conflicts, rx)
 
         report_dir = medic_dir(project_root)
-        ts_file = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts_file = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 毫秒级，避免同秒覆盖
         report_path = os.path.join(report_dir, f"skill_audit_report_{ts_file}.md")
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -1383,16 +1492,23 @@ def main():
     if args.action == "cleanup":
         """清理本次会话的临时中间产物（保留清单与历史报告——它们是增量模式与历史对比的基础）"""
         report_dir = medic_dir(project_root)
+        # 白名单化：只清理确定的临时中间产物；显式保留接力棒（断点续跑/历史机制基础）
+        # 与 _medic_inventory.json / _medic_last_inventory.json / 历史报告（增量对比基础）
+        temp_medic_files = {"_medic_classify.json", "_medic_conflicts.json",
+                            "_medic_scores.json", "_medic_rx.json", "_medic_review.json"}
         cleaned = []
         for f in os.listdir(report_dir):
-            # 只清理临时中间产物：classify/conflicts/scores/rx（_medic_ 前缀且非 inventory）
-            if f.startswith("_medic_") and f != "_medic_inventory.json":
+            if f in temp_medic_files:
                 fpath = os.path.join(report_dir, f)
-                os.remove(fpath)
-                cleaned.append(f)
-        # _medic_inventory.json 与 skill_audit_report_* 是历史资产，MED_CLOSE 后保留供下次审计对比
-        print(json.dumps({"cleaned": cleaned, "count": len(cleaned),
-                          "kept": ["_medic_inventory.json", "skill_audit_report_*.md"]}, ensure_ascii=False))
+                try:
+                    os.remove(fpath)
+                    cleaned.append(f)
+                except OSError as e:
+                    print(f"Warning: 清理 {f} 失败: {e}")
+        kept = sorted(set(os.listdir(report_dir)) | {"_medic_baton.json", "_medic_inventory.json",
+                      "_medic_last_inventory.json"} |
+                      {f for f in os.listdir(report_dir) if f.startswith("skill_audit_report_")})
+        print(json.dumps({"cleaned": cleaned, "count": len(cleaned), "kept": kept}, ensure_ascii=False))
         return
 
 

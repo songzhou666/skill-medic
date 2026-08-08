@@ -21,12 +21,12 @@ MED_SCOPE → MED_ROSTER → MED_SORT → MED_CONFLICT → MED_VITAL → MED_RX 
 
 ### 断点续跑
 
-中断后再次调用，读接力棒跳过已完成阶段，从第一个 ⬜ 阶段继续。
+中断后再次调用，先做**产物回退校验**（✅ 阶段产物缺失 → 回退重做），再对含审核闸门的阶段（`gateN` 为 ⬜ 或被打回重做）**强制重跑 05-auditor** 一次，然后从第一个 ⬜ 阶段继续（详见 00-master-controller 启动流程）。
 
 ### 熔断
 
-- 子 Agent 超时（120s）→ 自动重试 1 次 → 仍失败则记录 last_error，`state=FAILED`
-- 同一阻断累计重试 ≥3 次 → `state=FAILED`
+- 子 Agent 超时（120s）→ 自动重试 1 次 → 仍失败则记录 last_error，`state=FAILED`（is_running 保持 1，由下次调用按状态异常处理恢复，**非死局**）
+- 同一阶段/闸门累计重试 ≥3 次 → `state=FAILED` 并停止自动重试，转人工
 
 ## 命名空间
 

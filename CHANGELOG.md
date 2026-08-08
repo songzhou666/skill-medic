@@ -1,5 +1,117 @@
 # CHANGELOG
 
+## v0.4.16 (2026-08-08)
+
+### 六轮回归收敛修复（2 子 Agent：v0.4.15 回归验证 / 残余问题排查）+ 完整端到端测试
+
+- **回归验证结论**：v0.4.15 的 12 个修复点全部真实落地，无 P0/P1，未引入新矛盾
+- **P2 fix-frontmatter 边界**：`(completeness or 1) < 1` 的 `or 1` 把 `completeness=0.0`（frontmatter 存在但 4 必填字段全空）误提升为 1 而漏触发 → 去掉 `or 1`（get 默认值已是 1）
+- **P2 命名泛化**：run.py 注释残留 `xbrowser`、chunk-07 回填示例残留 `scout/parse/manual-gen` 真实 Skill 名 → 泛化为 `skills/<skill>` 与"示例 Skill A/B/C"
+- **P2 examples diff 参数**：`<last_inventory>`（必填）→ `[last_inventory]`（可选，缺省读上次清单），与 cli-guide/run.py 一致
+- **P2 description 优化**：压缩至 ~150 字符（原 194，距 ≤200 上限余量翻倍），反触发摘要补齐正文 6 类（新增 C 盘清理、代码审查/安全扫描），SKILL.md 与 manifest 同步
+- **完整端到端测试（12 项全过）**：ping / scan / analyze（字段全）/ categorize / conflict / score 累积 / prescribe / report（第 9 部分定级阈值 ✅、正文零裸文本 ✅）/ diff / cleanup（白名单 ✅）/ broken ✅ / 无 frontmatter ✅
+- 验证：py_compile 通过；测试临时目录已清理；版本 0.4.15 → 0.4.16
+
+## v0.4.15 (2026-08-08)
+
+### 五轮实测验证收敛修复（3 子 Agent：全链路引用矩阵 / run.py 逐函数终审 / 真实环境端到端实跑）
+
+- **P1 报告第 9 部分缺固定定级阈值**（BLOCK-E 阻断项，代码终审 + 实跑双重确认）：build_report 第 9 部分补
+  "定级规则（固定阈值）：L3≥80 ｜ L2 55~79 ｜ L1 30~54 ｜ L0<30（引用 chunk-05，禁止自创）"
+- **P1 merge 处方 severity 写死 high 与候选"待确认"矛盾**：改为继承候选 `c.get("severity", "candidate")`，
+  与第 5 部分冲突矩阵一致（C1 高/中定级仍由 05-auditor 闸门① 补齐）
+- **P1 脚本工具型判定与 chunk-03 不符**：chunk-03 同步"description 含 run.py/CLI/命令行 精确词 或 tools 目录"
+- **P2 实跑修复**：diff 错误消息补 `ensure_ascii=False`（中文不再转义）；diff 任一侧 mtime 缺失回退字符数比较
+  （当前读取失败不再漏检）；报告第 2 部分"常驻估算 token"改用 `always_load_tokens_est`（与 C3 口径一致）
+- **P2 健壮性**：read_file_safe 改 `utf-8-sig` 兼容 BOM（Windows 常见）+ 512KB 超限截断（§14 风险对策）；
+  boundary 处方 severity 继承 C4 候选；fix-frontmatter 触发改 `completeness < 1`（字段不全也覆盖）；
+  analyze_skill 补 path/description/has_tools/mtime 等字段，SKILL.md 缺失时与 scan 一致走设计文档 fallback；
+  classify_skill 生命周期判定顺序修正（有 CHANGELOG=活跃维护优先于"仅有设计稿"的"开发中"）
+- **P2 性能**：build_conflict_candidates C4/C5 共用 collect_skill_text 缓存（消除每 Skill 重复 I/O）
+- **P3**：需求文档 §8.3 模块注释修正（扫描/冲突引擎/token 估算内置单文件）；chunk-03 生命周期表补实现口径说明
+- 验证：py_compile 通过；实跑确认报告第 9 部分阈值、diff 中文、merge candidate、fix-frontmatter 全覆盖
+  均正确；报告正文零裸文本；版本 0.4.14 → 0.4.15
+
+## v0.4.14 (2026-08-08)
+
+### 四轮验收收敛修复（3 子 Agent：三方一致性终审 / v0.4.13 回归 / 用户视角演练）
+
+- **P1 cli-guide project_root 铁律**：消除"cd {CLI_DIR} 后 Get-Location 取到 CLI_DIR 当项目根"的静默空产物风险——明确 project_root 永远取会话项目根，与 cd 无关，Get-Location 不得替代
+- **P1 断点续跑 batch 恢复**：00-master 续跑补"读取接力棒 batch 段传给 04，已完成组跳过、未完成组继续"；04-scorer 补"batch 段是批进度唯一数据源"
+- **P1 gate 续跑时序**：改为"先续完阶段全部批 → 阶段产物完整后 → 再强制重跑 05 全覆盖审核 → 放行"（避免部分评分被审、剩余批漏审）
+- **P1 cleanup 收口顺序**：00-master 先收口（state=CLOSE / 回填 artifacts.report / 登记 prescriptions_outstanding）→ 最后执行 cleanup；07 只产出摘要与报告路径回报
+- **P2 scores 写回段名统一**：chunk-05 / 04-scorer / 07-reporter 统一为"保留 CLI 顶层信号块 + 追加 llm_scores 键"（run.py 实际结构）；run.py score 合并改为 `{**旧, **新}` 保留既有键，防重复调用覆盖 LLM 分数
+- **P2 需求文档对齐**：§5.3 C4/C5 检测信号列（删"版本约定不一致"/"同一库表写入权"、补 mtime 差异）、§6.2/§8.2 score 签名补 root、§9.2 常驻口径（SKILL.md + chunk-index）、§6.3 熔断补"is_running 保持 1 非死局"、§10.3 补"子 Agent"、§9.1 补 ~/.qclaw/skills、§7 图例补"对号入座"、§6.3 batch/history 示例补 conflict_pairs 与报告路径、§9.4 补 meta 前缀、§11.1 标注规划项
+- **P2 执行可操作性**：C1 严重度补齐指定唯一责任人（05-auditor 闸门① 依据 scores.json 补齐写回）；跨组冲突对批次来源与预算明确（按 domain_final 分组 + ≤3 对/批 + ≤10k token）；06 处方 severity 以 conflicts.json 写回版为准
+- **P3 收敛**：examples.md 报告路径改 `./.medic/` + path 字段加注；run.py docstring conflict/score 补 --save；chunk-04 补 C4_infra 聚合说明
+- 验证：py_compile 通过；版本 0.4.13 → 0.4.14
+
+## v0.4.13 (2026-08-08)
+
+### 三轮复查收敛修复（3 子 Agent：回归验证 / 深度角落 / 全文一致性）
+
+- **P1 需求文档残留**：标题与文末版本号改为 v0.4.13；§6.1/§10 两处"批间写接力棒进度"旧表述改为"回报 00-master 代写"（单点写全量清零）；§6.3 接力棒结构示例补 gate1/2/3 与 CLOSE 终态；控制规则同步断点续跑产物回退 + FAILED 分支优先 + 熔断转人工口径
+- **P1 cli-guide 补录限制缺注**：分工表补"run.py 以磁盘扫描为准，IDE 补录项由 07 报告手工补入"
+- **P2 run.py 业务逻辑**：C3 上下文膨胀改用常驻口径（SKILL.md + load:always chunk 索引，scan 新增 `always_load_tokens_est` 字段）；C4 严重度实现 mtime 差异 → 高（新增 `C4_MTIME_DIFF_SEC`，>7 天）；build_report 历史洞察占位改 HTML 注释并补"冲突新增与缓解"三要素；cleanup kept 按实际报告文件计算（去 glob 字面量）
+- **P2 文档-实现对齐**：chunk-02 broken 判定对齐 run.py（目录不可读→跳过记未覆盖、frontmatter 缺失→仍 active 触发 fix-frontmatter）；全局候选目录补 `~/.qclaw/skills`；chunk-02 合并写回铁律 + chunk-05 LLM 打分写回铁律；faq-deep Q6 增量数据源改为 `_medic_last_inventory.json`、Q10 补产物回退与重审；conflict-catalog C3 常驻口径 / C4 删未落地"版本约定不一致"、补 mtime 差异 / C5 明确 DB 写入权归 C4；chunk-04 C3/C4/C5 表同步；熔断口径统一为"FAILED 非死局，is_running 保持 1 由下次调用恢复"（chunk-01/06、05-auditor）
+- **P2 措辞同步**：00-master 重审名单补 MED_CONFLICT；chunk-09"任何 agent"→"任何子 Agent"+ 阻断码表指向完整版；cli-guide diff 缺省参数 `[last_inventory]` + score 路径入参；README 快速开始 conflict/score/prescribe 补 `--save`；chunk-08 联网流程补第 5 步写入接力棒 rubric_version + §8.4 引用；04-scorer TypeError 描述改为"损坏备份重建"；examples.md 反斜杠路径改正斜杠
+- 验证：py_compile 通过；版本 0.4.12 → 0.4.13
+
+## v0.4.12 (2026-08-08)
+
+### 整体机制复查修复（4 子 Agent 二轮交叉检查：机制 / 文档 / 工具层 / 全流程走查）
+
+- **P1 接力棒单点写穿透**：04-scorer / chunk-05 / chunk-09 指示"批间写接力棒"，与单点写铁律互斥 →
+  统一口径：**所有子 Agent 禁止写棒**，04 批进度 / 06 处方登记完成后**回报 00-master 代写**；
+  cli-guide 分工表同步
+- **P1 FAILED 恢复分支被遮蔽**：00-master 判断顺序 is_running=1 先于 FAILED，FAILED 时 is_running 保持 1
+  导致恢复路径不可达 → 启动分支顺序改为"FAILED/损坏 优先于 is_running"
+- **P1 产物缺失回退未落地**：断点续跑只"跳过 ✅ 阶段"不校验产物 → 00-master 续跑增加产物回退校验
+  + 闸门进度强制重跑 05（gate1/gate2/gate3 纳入 progress）
+- **P1 03-conflict 证据无落盘**：LLM 确认的严重度/证据只留对话里 → chunk-04 + 03-conflict-agent 补
+  "覆盖写回 `_medic_conflicts.json`（severity/evidence≥2/impact）"铁律
+- **P1 01 合并清单空转**：available_skills 合并结果无写回、下游 run.py 全量重扫磁盘丢补录 →
+  01 明确覆盖写回 inventory.json；cli-guide 注明"run.py 以磁盘扫描为准，补录项由 07 报告手工补入"
+- **P1 C1 严重度时序矛盾**：评分差判定依赖 MED_VITAL 但冲突检测在前 → chunk-04 补时序说明
+  （candidate → MED_VITAL 后由 05/07 依据 scores.json 补齐高/中定级）
+- **P2 run.py 健壮性**：score 落盘损坏时备份重建（防静默清空累积分数）；diff 状态变化（active↔broken）视为变更；
+  report 归档失败告警；collect_skill_text / cleanup / scan 内层 listdir/getmtime 兜底（_safe_listdir/_safe_mtime）；
+  analyze 死代码分支删除
+- **P2 文档同步**：需求文档 §6.3 artifacts 补 4 字段 / §16.5 cleanup 表述 / §16.1 补 examples / §5.1 删"其他" /
+  diff 缺省参数 / 标题与文末版本；phase-protocol 闸门表补审核闸门①/②/③；chunk-03/chunk-06 补写回铁律；
+  examples.md C2 示例严重度 medium；BLOCK-F 打回目标具体化；chunk-05 score 命令补 root
+- 验证：py_compile 通过；版本 0.4.11 → 0.4.12
+
+## v0.4.11 (2026-08-08)
+
+### 整体机制审查修复（4 子 Agent 交叉检查：机制 / 文档 / 工具层 / 全流程走查）
+
+- **P0 cleanup 误删接力棒**：原逻辑删除所有 `_medic_*`（仅豁免 inventory），会把 `_medic_baton.json` 一起删掉 → 白名单化，只清理 classify/conflicts/scores/rx/review，**显式保留接力棒 / 本次与上次清单 / 历史报告**
+- **P1 历史对比数据源三重错位**：本次清单覆盖 inventory → report 前先把本次清单归档为 `_medic_last_inventory.json` 再覆盖，build_report 与 diff 缺省路径统一读 last；diff 变更判定改用 mtime（旧清单无 mtime 回退字符数比较），修复 ceil 取整漏报
+- **P1 score 落盘键不稳定**：`scores[skill_name]` 用原始入参（路径/目录名不固定）→ 统一 `scores[base]`（目录名）
+- **P1 05-auditor 调度黑洞**：路由表无 05 阶段引用 → 00-master 补审核闸门①（MED_VITAL 后）/ ②（MED_RX 后）/ ③（MED_DEBRIEF 后）
+- **P1 MED_CLOSE 写棒与单点写冲突**：07-reporter 写接力棒违反"只有 00-master 写" → MED_CLOSE 收口归 00-master（验证 07 产出后更新 state/is_running/history）
+- **P1 分类初值来源文档错位**：chunk-03/02 写"读 inventory"实际读 `.medic/_medic_classify.json` → 文档对齐
+- **P2 批量**：report 时间戳毫秒级（同秒并发覆盖）；scan 补 mtime；docstring 补 categorize/prescribe/diff 缺省参数；listdir try/except 兜底；cleanup 空 active 名单不报错；C1/C2 冲突阈值文档对齐；02-classifier domain_final 明确写回 classify.json；06-synthesizer 处方完善写回 rx.json + prescriptions_outstanding 登记；接力棒协议补状态异常处理（FAILED / 产物缺失回退 / JSON 损坏备份重建）
+- 验证：py_compile 通过；需求文档 §8.2 / 目录结构 / 审核范围同步；版本 0.4.10 → 0.4.11
+
+## v0.4.10 (2026-08-08)
+
+### 报告正文零场外话改造（真实用户反馈：成品报告残留"（LLM 列出名字）/ 例：/ LLM 回填"等模板指导语）
+
+- **P1 模板指导语泄漏进报告正文**：build_report 骨架含"例：""（LLM 回填）""（LLM 列出名字，没有就写'无'）""回填区"等执行指导语，
+  LLM 回填时未替换干净，直接出现在成品报告里，不专业
+- 修复（run.py build_report）：
+  - 所有模板指导语 → **HTML 注释**（`<!-- ... -->`，渲染不可见、回填后删除），正文只留干净专业结构
+  - 标题/表头去模板后缀：`## 1. 给你的结论`、`| # | 问题 |`、`通俗评估`、`## 4. 分类表`、`## 5. 冲突与问题`、`## 6. 评分明细`、`### 7.1 使用建议（如果你是…）`、`## 8. 历史对比`
+  - "待 LLM 判定" → "未归类"；白话导读/影响示例/回填区 → HTML 注释
+  - 报告尾部改为"*本报告由 SkillMedic 自动生成；结论、评分定级与行动建议由 AI 结合完整检查流程输出。*"
+- 执行层强约束（防再犯）：
+  - chunk-07 / 07-reporter 新增"**报告正文零场外话铁律**"：回填时替换并删除全部 HTML 注释、补全空占位，
+    最终正文不得残留"例：/LLM 回填/AI 回填/回填区"或未替换的"（）"空占位
+  - 05-auditor BLOCK-E 新增阻断：报告正文残留模板指导语或未删除的 HTML 注释 → 打回 07-reporter
+- 验证：py_compile 通过；report 实跑新骨架干净（无"例：/LLM 回填"字样，指导语仅以 HTML 注释形式存在）；版本 0.4.9 → 0.4.10
+
 ## v0.4.9 (2026-08-05)
 
 ### TRACE 自检补漏（对照 skill-trace-checker 25 项清单）

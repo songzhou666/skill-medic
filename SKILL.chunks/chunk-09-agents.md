@@ -10,7 +10,7 @@
 | 01-inventory-agent | 轻量粗扫（scan + analyze），只读 frontmatter + 目录树 + 静态指标 | Task 子 Agent |
 | 02-classifier-agent | 三维分类 + 同组标记 | Task 子 Agent |
 | 03-conflict-agent | 五类冲突规则执行 + 证据确认 | Task 子 Agent |
-| 04-scorer-agent | 按分组批处理打分，每批 ≤3 个 Skill，批间写接力棒 | Task 子 Agent |
+| 04-scorer-agent | 按分组批处理打分，每批 ≤3 个 Skill，批间回报进度由 00-master 代写接力棒 | Task 子 Agent |
 | 05-auditor-agent | 独立审核：抽查分类/冲突/打分证据是否成立 | Task 子 Agent（强制） |
 | 06-synthesizer-agent | 汇总矩阵 × 评分 → 处方清单 | Task 子 Agent |
 | 07-reporter-agent | 生成 Skill 检查报告 + 落盘 | Task 子 Agent |
@@ -49,4 +49,6 @@
 - 禁止 04-scorer 读取审核结论后再改分数
 - 禁止 05-auditor 阅读其他 agent 推理过程
 - 禁止 00-master 代子 agent 产出内容
-- 禁止任何 agent 直接修改接力棒
+- 禁止任何子 Agent 直接修改接力棒
+
+> 完整阻断码触发条件见 `agents/05-auditor-agent.md` 阻断码表（chunk-09 为简化版，BLOCK-C/E 含更多触发项）。
